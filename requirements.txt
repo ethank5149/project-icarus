@@ -1,0 +1,10 @@
+numpy>=1.24
+scipy>=1.10
+scikit-learn>=1.3
+joblib>=1.3
+h5py>=3.9
+openmdao>=3.28
+dymos>=1.18
+matplotlib>=3.7
+dolfinx>=0.7
+pyvista>=0.43

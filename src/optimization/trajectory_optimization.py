@@ -1,44 +1,115 @@
-import openmdao.api as om
-import joblib
 import numpy as np
+import openmdao.api as om
+import dymos as dm
+from .phases.boost_phase import BoostODE
+from .phases.midcourse_phase import MidcourseODE
+from .phases.terminal_phase import TerminalODE
 
-class AeroSurrogateComponent(om.ExplicitComponent):
-    """
-    Wraps the GPR surrogate for OpenMDAO.
-    """
-    def initialize(self):
-        self.options.declare('model_path', default='aero_surrogate.pkl')
 
-    def setup(self):
-        self.add_input('mach', val=2.0)
-        self.add_input('alpha', val=0.0)
-        self.add_output('drag_force', val=0.0)
-        self.gpr = joblib.load(self.options['model_path'])
+def build_trajectory_problem():
+    p = om.Problem()
 
-    def compute(self, inputs, outputs):
-        X_new = np.array([[inputs['mach'][0], inputs['alpha'][0]]])
-        cd_coeff = self.gpr.predict(X_new)
-        
-        # Physics calculation
-        # Force = 0.5 * rho * v^2 * Area * Cd
-        rho = 1.225
-        outputs['drag_force'] = 0.5 * rho * 500**2 * 0.1 * cd_coeff
+    model = p.model
+    model.add_subsystem("interceptor", om.IndepVarComp(), promotes=["*"])
+    model.interceptor.add_output("mass", val=1000.0)
+    model.interceptor.add_output("area", val=0.1)
+    model.interceptor.add_output("ref_length", val=1.0)
+    model.interceptor.add_output("kill_radius", val=0.5)
+    model.interceptor.add_output("kill_mechanism", val="hit_to_kill")
 
-class InterceptorProb(om.Problem):
-    def setup(self):
-        model = self.model
-        group = model.add_subgroup('flight')
-        
-        # Add the surrogate component
-        group.add_subsystem('aero', AeroSurrogateComponent())
-        
-        # Add a design variable
-        group.add_design_var('aero.alpha', lower=0, upper=15)
-        group.add_objective('aero.drag_force')
+    tx = dm.Radau(num_nodes=10)
 
-# Initialize and run
-prob = InterceptorProb()
-prob.setup()
-prob.run_model()
+    boost = dm.Phase(
+        ode_class=BoostODE,
+        transcription=tx,
+    )
+    boost.set_time_options(fix_initial=True, duration_val=60.0)
+    boost.add_state("r", rate_source="dr_dt", units="m")
+    boost.add_state("v", rate_source="dv_dt", units="m/s")
+    boost.add_state("q", rate_source="dq_dt", units=None)
+    boost.add_state("omega", rate_source="domega_dt", units="rad/s")
+    boost.add_state("m", rate_source="dm_dt", units="kg")
 
-print(f"Optimal Drag Found: {prob.get_val('flight.aero.drag_force')[0]:.2f} N")
+    boost.add_control("thrust", units="N", opt=True, lower=0.0)
+    boost.add_control("gimbal_beta", units="rad", opt=True, lower=-0.26, upper=0.26)
+    boost.add_control("gimbal_delta", units="rad", opt=True, lower=-0.26, upper=0.26)
+
+    boost.add_input_parameter("boundary_alt", val=100e3, static_target=True)
+
+    boost.add_objective("time", scaler=-1.0)
+
+    model.add_subsystem("boost", boost)
+
+    midcourse = dm.Phase(
+        ode_class=MidcourseODE,
+        transcription=tx,
+    )
+    midcourse.set_time_options(fix_initial=False, duration_val=120.0)
+    midcourse.add_state("r", rate_source="dr_dt", units="m")
+    midcourse.add_state("v", rate_source="dv_dt", units="m/s")
+    midcourse.add_state("q", rate_source="dq_dt", units=None)
+    midcourse.add_state("omega", rate_source="domega_dt", units="rad/s")
+    midcourse.add_state("m", rate_source="dm_dt", units="kg")
+
+    midcourse.add_control("accel_x", units="m/s**2", opt=True, lower=-50.0, upper=50.0)
+    midcourse.add_control("accel_y", units="m/s**2", opt=True, lower=-50.0, upper=50.0)
+    midcourse.add_control("accel_z", units="m/s**2", opt=True, lower=-50.0, upper=50.0)
+
+    midcourse.add_input_parameter("boundary_alt", val=100e3, static_target=True)
+
+    model.add_subsystem("midcourse", midcourse)
+
+    terminal = dm.Phase(
+        ode_class=TerminalODE,
+        transcription=tx,
+    )
+    terminal.set_time_options(fix_initial=False, duration_val=30.0)
+    terminal.add_state("r", rate_source="dr_dt", units="m")
+    terminal.add_state("v", rate_source="dv_dt", units="m/s")
+    terminal.add_state("q", rate_source="dq_dt", units=None)
+    terminal.add_state("omega", rate_source="domega_dt", units="rad/s")
+    terminal.add_state("m", rate_source="dm_dt", units="kg")
+
+    terminal.add_control("accel_x", units="m/s**2", opt=True, lower=-150.0, upper=150.0)
+    terminal.add_control("accel_y", units="m/s**2", opt=True, lower=-150.0, upper=150.0)
+    terminal.add_control("accel_z", units="m/s**2", opt=True, lower=-150.0, upper=150.0)
+
+    terminal.add_input_parameter("boundary_alt", val=100e3, static_target=True)
+    terminal.add_input_parameter("kill_mechanism", val="hit_to_kill", static_target=True)
+    terminal.add_input_parameter("kill_radius", val=0.5, static_target=True)
+
+    model.add_subsystem("terminal", terminal)
+
+    boost.link_phases([midcourse], vars=["r", "v", "q", "omega", "m"], connect=False)
+    midcourse.link_phases([terminal], vars=["r", "v", "q", "omega", "m"], connect=False)
+
+    p.driver = om.ScipyOptimizeDriver(optimizer="SLSQP")
+    p.driver.declare_coloring(show_summary=True)
+
+    p.setup()
+
+    p.set_val("boost.t_initial", 0.0)
+    p.set_val("boost.t_duration", 60.0)
+    p.set_val("midcourse.t_initial", 60.0)
+    p.set_val("midcourse.t_duration", 120.0)
+    p.set_val("terminal.t_initial", 180.0)
+    p.set_val("terminal.t_duration", 30.0)
+
+    p.set_val("boost.states:r", [0.0, 0.0, 0.0])
+    p.set_val("boost.states:v", [0.0, 0.0, 100.0])
+    p.set_val("boost.states:q", [1.0, 0.0, 0.0, 0.0])
+    p.set_val("boost.states:omega", [0.0, 0.0, 0.0])
+    p.set_val("boost.states:m", 1000.0)
+
+    p.set_val("terminal.states:r", [100000.0, 0.0, 100000.0])
+    p.set_val("terminal.states:v", [-500.0, 0.0, -500.0])
+    p.set_val("terminal.states:q", [1.0, 0.0, 0.0, 0.0])
+    p.set_val("terminal.states:omega", [0.0, 0.0, 0.0])
+    p.set_val("terminal.states:m", 15.0)
+
+    return p
+
+
+if __name__ == "__main__":
+    p = build_trajectory_problem()
+    dm.run_problem(p, run_driver=True, simulate=False)
