@@ -6,16 +6,23 @@ from .phases.midcourse_phase import MidcourseODE
 from .phases.terminal_phase import TerminalODE
 
 
-def build_trajectory_problem():
+def build_trajectory_problem(interceptor=None, guidance=None):
+    if interceptor is None:
+        from ..interceptors.config import InterceptorConfig
+        interceptor = InterceptorConfig()
+    if guidance is None:
+        from ..guidance.law import GuidanceLaw
+        guidance = GuidanceLaw()
+
     p = om.Problem()
 
     model = p.model
     model.add_subsystem("interceptor", om.IndepVarComp(), promotes=["*"])
-    model.interceptor.add_output("mass", val=1000.0)
-    model.interceptor.add_output("area", val=0.1)
-    model.interceptor.add_output("ref_length", val=1.0)
-    model.interceptor.add_output("kill_radius", val=0.5)
-    model.interceptor.add_output("kill_mechanism", val="hit_to_kill")
+    model.interceptor.add_output("mass", val=interceptor.mass)
+    model.interceptor.add_output("area", val=interceptor.area)
+    model.interceptor.add_output("ref_length", val=interceptor.ref_length)
+    model.interceptor.add_output("kill_radius", val=interceptor.kill_radius)
+    model.interceptor.add_output("kill_mechanism", val=interceptor.kill_mechanism)
 
     tx = dm.Radau(num_nodes=10)
 
@@ -75,8 +82,8 @@ def build_trajectory_problem():
     terminal.add_control("accel_z", units="m/s**2", opt=True, lower=-150.0, upper=150.0)
 
     terminal.add_input_parameter("boundary_alt", val=100e3, static_target=True)
-    terminal.add_input_parameter("kill_mechanism", val="hit_to_kill", static_target=True)
-    terminal.add_input_parameter("kill_radius", val=0.5, static_target=True)
+    terminal.add_input_parameter("kill_mechanism", val=interceptor.kill_mechanism, static_target=True)
+    terminal.add_input_parameter("kill_radius", val=interceptor.kill_radius, static_target=True)
 
     model.add_subsystem("terminal", terminal)
 
@@ -99,7 +106,7 @@ def build_trajectory_problem():
     p.set_val("boost.states:v", [0.0, 0.0, 100.0])
     p.set_val("boost.states:q", [1.0, 0.0, 0.0, 0.0])
     p.set_val("boost.states:omega", [0.0, 0.0, 0.0])
-    p.set_val("boost.states:m", 1000.0)
+    p.set_val("boost.states:m", interceptor.mass)
 
     p.set_val("terminal.states:r", [100000.0, 0.0, 100000.0])
     p.set_val("terminal.states:v", [-500.0, 0.0, -500.0])
