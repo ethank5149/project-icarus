@@ -25,7 +25,8 @@ class TerminalGuidance:
         self._last_los = (angle, range_)
         return angle, range_
 
-    def commanded_accel(self, t, interceptor_state, target_state, los_rate=None, range_=None):
+    def commanded_accel(self, t, interceptor_state, target_state, los_rate=None, range_=None,
+                        disable_fov=False):
         if target_state is None:
             return np.zeros(3)
         r = np.asarray(interceptor_state["r"], dtype=float)
@@ -34,10 +35,11 @@ class TerminalGuidance:
         los = tgt[:3] - r
         range_ = np.linalg.norm(los)
         los_unit = los / max(range_, 1e-6)
-        angle = np.arccos(np.clip(los_unit[0], -1.0, 1.0))
-        if angle > self.fov:
-            # Out of field of view: hold last command (zero as safe default).
-            return np.zeros(3)
+        if not disable_fov:
+            angle = np.arccos(np.clip(los_unit[0], -1.0, 1.0))
+            if angle > self.fov:
+                # Out of field of view: hold last command (zero as safe default).
+                return np.zeros(3)
         rel_vel = tgt[3:6] - v
         los_dot = (rel_vel - np.dot(rel_vel, los_unit) * los_unit) / max(range_, 1e-6)
         Vc = -np.dot(rel_vel, los_unit)

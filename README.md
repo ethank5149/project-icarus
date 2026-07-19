@@ -40,6 +40,14 @@ Inspired by tiered missile defense architectures (Arrow 2/3, David's Sling, Iron
 - **Result API**: `EngagementResult` with built-in 3D trajectory plotting, miss-distance histogram, and kill-probability analysis.
 - **Geodetic presets**: WGS84 coordinate conversion with realistic launch sites (USA interceptor bases, Russia/China target regions).
 
+### Real-World Location Database
+- `reference/locations.yml` holds ~110 real-world geodetic records (lat/lon/alt) tagged by `designation`: `defended-target` (homeland/C2/nuclear/ICBM sites), `interceptor-launch-site` (GMD, Aegis Ashore, THAAD bases), and `target-launch-site` (Russian/Chinese ICBM/SLBM garrisons and silo fields).
+- `reference/locations.py` loads the YAML and provides `locations_by_designation`, `locations_by_name`, `coordinates_to_ecef`, and a `_sanitize_key` helper.
+- `src/scenarios/presets.py` merges this database into the preset libraries at import: every `interceptor-launch-site` becomes an interceptor preset (precise coordinates override the rough built-ins), every `target-launch-site` becomes a `ballistic_target_*` preset, and every `defended-target` becomes a `defended_*` preset usable as an interceptor aim point (its geodetic `target_launch_site` is set) and as a threatened location for trajectory modeling.
+- **Threat→defended trajectories**: `geodetic_launch_to_target()` computes a great-circle launch azimuth and surface range from a threat site to a defended point, then derives a range-consistent launch velocity rotated into the local East/North/Up frame. `build_threat_to_defended(threat, defended, scenario_type=...)` exposes every threat family aimed at a defended point: `ballistic` (range-derived speed), `fobs` (fractional-orbit boost + deorbit steered toward the aim point), `hgv` (hypersonic glide inserted at glide altitude), `suppressed` (midcourse jinking along the threat axis), and `swarm` (spread RVs). A curated set of `threat_*_to_*` presets (e.g. `threat_kozelsk_to_washington_dc`, `..._fobs`, `..._hgv`, `..._suppressed`) registers all four families for 17 representative pairs. `FOBSScenario.propagate` was fixed so reentry steers toward the true aim point (previously hardcoded to a fixed location), and `SuppressedScenario` midcourse maneuvers now act along the horizontal threat axis instead of a hardcoded `+y`.
+
+- **Real closed-loop FOBS reentry**: the FOBS reentry is now a genuine PN-guided, EOM6DOF solve rather than the ad-hoc steering term. `FOBSScenario` caches a full boost → coast → deorbit → guided-reentry trajectory; the reentry is integrated with `simulate_guided_threat()`, which uses `scipy.integrate.solve_ivp` (adaptive RK45 with a ground-impact terminal event) driving the repo's `EOM6DOF` and `TerminalGuidance` (proportional navigation). The threat is the controlled body and the defended aim point is the PN target. `GuidedThreatConfig` exposes the RV mass/inertia/area/aero-boundary and guidance `accel_limit`/`N`. The PN law's interceptor-style seeker FOV gate is bypassed for threat homing (`commanded_accel(..., disable_fov=True)`).
+
 ### Jupyter Notebooks
 - `notebooks/engagement_sweep.ipynb` — high-level workflow: define configs, run single engagement, run batch sweep, visualize.
 - `notebooks/interactive_dashboard.ipynb` — ipywidgets dashboard with preset dropdowns for interceptor launch sites and target regions, geodetic lat/lon/alt inputs, sliders for interceptor mass, kill radius, guidance gain N, and MC trials. Runs engagement on button click and displays 3D trajectory, miss-distance distribution, and kill/no-kill counts.
@@ -86,6 +94,10 @@ src/
 │   ├── target_model.py
 │   └── decoy_model.py
 ├── constraints.py
+reference/
+├── locations.yml            # Real-world geodetic database of defended targets,
+│                            #   interceptor bases, and foreign launch complexes
+└── locations.py            # YAML loader + ECEF/key helpers
 tests/
 ├── test_eom.py
 ├── test_guidance.py

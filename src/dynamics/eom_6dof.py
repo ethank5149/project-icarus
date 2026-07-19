@@ -117,14 +117,17 @@ class EOM6DOF:
 
         g_inertial = gravity_inertial(r, use_j2=self.use_j2)
         f_gravity_body = rotate_inertial_to_body(g_inertial, q)
-        f_total_body = f_aero_body + f_thrust_body + f_gravity_body
+        # ``gravity_inertial`` returns an acceleration; aero/thrust are forces and
+        # are divided by mass below. Apply gravity as an acceleration directly so
+        # it is not erroneously mass-scaled.
+        f_total_body = f_aero_body + f_thrust_body
 
         f_total_inertial = rotate_body_to_inertial(f_total_body, q)
         m_gravity_body = gravity_gradient_torque(r, q, self.inertia_inv, use_j2=self.use_j2)
         m_total_body = m_aero_body + m_thrust_body + m_gravity_body
 
         dr_dt = v
-        dv_dt = f_total_inertial / max(m, 1e-6)
+        dv_dt = f_total_inertial / max(m, 1e-6) + g_inertial
         dq_dt = quat_kinematics(q, omega)
         domega_dt = self.inertia_inv @ (m_total_body - np.cross(omega, self.inertia @ omega))
         dm_dt = mass_dot

@@ -3,6 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Dict, Any, Protocol, runtime_checkable
 import numpy as np
+from scipy.integrate import solve_ivp
+
+from ..dynamics.eom_6dof import EOM6DOF
+from ..guidance.terminal_guidance import TerminalGuidance
+from ..aero.aero_analytical import blended_aero
 
 
 MU_EARTH = 3.986004418e14
@@ -23,6 +28,168 @@ def _two_body_accel(r, use_j2=True):
         )
         a = factor * r
     return a
+
+
+# --- Spherical-Earth geodetic helpers (for aim-point computation) ----------
+# These are intentionally lightweight (spherical Earth, not WGS84) so the
+# target factory has no import cycle with ``scenarios.presets``.
+
+def _ecef_to_geodetic(r):
+    x, y, z = r
+    lon = np.degrees(np.arctan2(y, x))
+    lat = np.degrees(np.arctan2(z, np.sqrt(x**2 + y**2)))
+    alt = np.linalg.norm(r) - R_EARTH
+    return float(lat), float(lon), float(alt)
+
+
+def _geodetic_to_ecef_simple(lat_deg, lon_deg, alt_m=0.0):
+    lat = np.radians(lat_deg)
+    lon = np.radians(lon_deg)
+    r = R_EARTH + alt_m
+    return np.array([
+        r * np.cos(lat) * np.cos(lon),
+        r * np.cos(lat) * np.sin(lon),
+        r * np.sin(lat),
+    ])
+
+
+def _destination_point(lat_deg, lon_deg, az_deg, dist_deg):
+    """Spherical destination point given start, azimuth (deg, 0=N CW), arc deg."""
+    lat1 = np.radians(lat_deg)
+    lon1 = np.radians(lon_deg)
+    az = np.radians(az_deg)
+    d = np.radians(dist_deg)
+    lat2 = np.arcsin(
+        np.sin(lat1) * np.cos(d) + np.cos(lat1) * np.sin(d) * np.cos(az)
+    )
+    lon2 = lon1 + np.arctan2(
+        np.sin(az) * np.sin(d) * np.cos(lat1),
+        np.cos(d) - np.sin(lat1) * np.sin(lat2),
+    )
+    return float(np.degrees(lat2)), float(np.degrees(lon2))
+
+
+@dataclass
+class GuidedThreatConfig:
+    """Vehicle + guidance parameters for a real closed-loop (PN-guided) threat.
+
+    Reuses the repo's existing EOM6DOF + TerminalGuidance laws rather than the
+    ad-hoc steering term used by the analytic scenarios.
+    """
+
+    mass: float = 1200.0
+    inertia: Any = field(default_factory=lambda: np.diag([150.0, 300.0, 300.0]))
+    area: float = 0.2
+    ref_length: float = 1.5
+    boundary_alt: float = 100e3
+    taper_width: float = 5e3
+    use_j2: bool = True
+    accel_limit: float = 80.0
+    N: float = 4.0
+
+
+def _guided_surrogate(mach, alpha, beta, alt):
+    return blended_aero(mach, alpha, beta, alt)[:3]
+
+
+def simulate_guided_threat(
+    r0: np.ndarray,
+    v0: np.ndarray,
+    aim_point: np.ndarray,
+    vehicle: Optional[GuidedThreatConfig] = None,
+    guidance_law: Optional[TerminalGuidance] = None,
+    t0: float = 0.0,
+    t_end: float = 600.0,
+):
+    """Closed-loop PN-guided propagation of a threat toward ``aim_point``.
+
+    Integrates the full 6-DOF EOM under aerodynamic + gravity loads, with a
+    proportional-navigation terminal-guidance law homing on the (ground,
+    stationary) aim point. Returns the sampled times and 6-vector states
+    ``[r(3), v(3)]`` so callers can interpolate at arbitrary query times.
+
+    The closed-loop RHS mirrors ``sim.runner._closed_loop_rhs`` but with the
+    threat as the controlled body and the defended aim point as the PN target.
+    """
+    if vehicle is None:
+        vehicle = GuidedThreatConfig()
+    if guidance_law is None:
+        guidance_law = TerminalGuidance(N=vehicle.N, accel_limit=vehicle.accel_limit)
+
+    eom = EOM6DOF(
+        mass=vehicle.mass,
+        inertia=vehicle.inertia,
+        area=vehicle.area,
+        ref_length=vehicle.ref_length,
+        boundary_alt=vehicle.boundary_alt,
+        taper_width=vehicle.taper_width,
+        use_j2=vehicle.use_j2,
+    )
+
+    q0 = np.array([1.0, 0.0, 0.0, 0.0])
+    omega0 = np.zeros(3)
+    m0 = vehicle.mass
+    y0 = np.concatenate([r0, v0, q0, omega0, [m0]])
+
+    aim = np.asarray(aim_point, dtype=float)
+
+    def rhs(t, y):
+        r = y[:3]
+        v = y[3:6]
+        q = y[6:10]
+        omega = y[10:13]
+        m = y[13]
+        q = q / max(np.linalg.norm(q), 1e-12)
+
+        eom_state = {"r": r, "v": v, "q": q, "omega": omega, "m": m}
+        target_state = np.concatenate([aim, np.zeros(3)])
+        accel_cmd = guidance_law.commanded_accel(
+            t, eom_state, target_state, disable_fov=True,
+        )
+
+        derivs = eom.compute(t, eom_state, _guided_surrogate)
+        dr_dt = derivs["r"]
+        dv_dt = derivs["v"] + accel_cmd * m / max(m, 1e-6)
+        return np.concatenate([
+            dr_dt, dv_dt, derivs["q"], derivs["omega"], [derivs["m"]],
+        ])
+
+    # Ground-impact terminal event: stop the integration the moment the RV
+    # reaches the surface (geodetic altitude <= 0). The adaptive Runge-Kutta
+    # stepper (RK45) takes large steps in vacuum and refines them automatically
+    # only inside the atmosphere, so no hand-rolled step-count guard is needed.
+    def _ground_event(t, y):
+        return np.linalg.norm(y[:3]) - R_EARTH
+
+    _ground_event.terminal = True
+    _ground_event.direction = -1
+
+    sol = solve_ivp(
+        rhs, (t0, t_end), y0,
+        method="RK45",
+        rtol=1e-6, atol=1e-9,
+        max_step=5.0,
+        dense_output=True,
+        events=_ground_event,
+        first_step=0.05,
+    )
+
+    # Sample the dense interpolant on a uniform grid for callers that linearly
+    # interpolate the returned arrays. The grid is coarse (2 s) because the
+    # interpolant is accurate; the ground event caps the final sample.
+    if sol.t_events[0] is not None and len(sol.t_events[0]) > 0:
+        t_end_eff = float(sol.t_events[0][0])
+    else:
+        t_end_eff = float(sol.t[-1])
+
+    if t_end_eff <= t0:
+        sol_t = np.array([t0, t0 + 1e-3])
+    else:
+        sol_t = np.linspace(t0, t_end_eff, max(int((t_end_eff - t0) / 2.0) + 1, 2))
+
+    grid = sol.sol(sol_t)
+    six_vec = np.vstack([grid[:3, :], grid[3:6, :]])
+    return sol_t, six_vec
 
 
 @runtime_checkable
@@ -79,49 +246,120 @@ class FOBSScenario:
     _boost_duration: float = 120.0
     _coast_duration: float = 600.0
     _reentry_alt: float = 100e3
+    deorbit_dv: float = 0.15
+    vehicle: Any = None
+    guidance: Any = None
+    use_j2: bool = True
     metadata: Dict[str, Any] = field(default_factory=dict)
+    _cache: Any = field(default=None, repr=False)
+
+    def __post_init__(self):
+        # Aim point: ground location the boost azimuth points to (used by the
+        # reentry phase so a geodetically-aimed FOBS converges on its target
+        # instead of a hardcoded (R_EARTH + 100km, 0, 0) point).
+        rmag = np.linalg.norm(self.r0)
+        if rmag > 1e-6 and np.linalg.norm(self.v0) > 1e-6:
+            lat0, lon0, _ = _ecef_to_geodetic(self.r0)
+            v_unit = self.v0 / np.linalg.norm(self.v0)
+            east = np.array([-np.sin(np.radians(lon0)), np.cos(np.radians(lon0)), 0.0])
+            north = np.array([
+                -np.sin(np.radians(lat0)) * np.cos(np.radians(lon0)),
+                -np.sin(np.radians(lat0)) * np.sin(np.radians(lon0)),
+                np.cos(np.radians(lat0)),
+            ])
+            az = np.degrees(np.arctan2(np.dot(v_unit, east), np.dot(v_unit, north))) % 360.0
+            # Downrange at apogee (~half the orbital coast arc) along great circle.
+            coast_arc_deg = (self._coast_duration * np.linalg.norm(self.v0) / rmag) / np.pi * 180.0
+            aim_lat, aim_lon = _destination_point(lat0, lon0, az, coast_arc_deg * 0.5)
+            self._aim_point = _geodetic_to_ecef_simple(aim_lat, aim_lon, 0.0)
+        else:
+            self._aim_point = np.array([R_EARTH + self._reentry_alt, 0.0, 0.0])
+        self._cache = None
 
     def _orbital_speed(self, r):
         return np.sqrt(MU_EARTH / max(r, 1e-6))
 
+    def _full_trajectory(self):
+        if self._cache is not None:
+            return self._cache
+        # Boost + coast modeled as an impulsive transfer onto the parking orbit
+        # (r0, v0) using Keplerian two-body propagation up to the coast end, then
+        # a retrograde deorbit burn at the coast-end point. This places the reentry
+        # start at the correct apogee altitude rather than the unphysical
+        # forward-Euler boost endpoint.
+        dt_boost = 0.5
+        boost_t = np.arange(0.0, self._boost_duration + dt_boost, dt_boost)
+        boost_states = []
+        r = self.r0.astype(float).copy()
+        v = self.v0.astype(float).copy()
+        for _ in boost_t:
+            boost_states.append(np.concatenate([r.copy(), v.copy()]))
+            a = _two_body_accel(r) + np.array([self.thrust, 0.0, 0.0])
+            v = v + a * dt_boost
+            r = r + v * dt_boost
+        boost_states.append(np.concatenate([r.copy(), v.copy()]))
+
+        # Coast: Keplerian two-body propagation from the boost-end state.
+        r_coast = boost_states[-1][:3].copy()
+        v_coast = boost_states[-1][3:].copy()
+        dt_coast = 0.5
+        coast_t = np.arange(0.0, self._coast_duration + dt_coast, dt_coast)
+        coast_states = []
+        rc, vc = r_coast.copy(), v_coast.copy()
+        for _ in coast_t:
+            coast_states.append(np.concatenate([rc.copy(), vc.copy()]))
+            a = _two_body_accel(rc, use_j2=self.use_j2)
+            vc = vc + a * dt_coast
+            rc = rc + vc * dt_coast
+        coast_states.append(np.concatenate([rc.copy(), vc.copy()]))
+
+        # Deorbit: the FOBS loiters in a parking orbit at the apogee altitude,
+        # then performs a retrograde burn that drops perigee onto the aim point.
+        # The deorbit state is placed on a near-collision course with the aim
+        # point (velocity directed toward the aim, with a small retrograde
+        # component so the trajectory actually enters the atmosphere). PN
+        # guidance then trims the residual error during the guided reentry.
+        r_park = R_EARTH + self.apoapsis_km * 1e3
+        v_park = np.sqrt(MU_EARTH / r_park)
+
+        # Deorbit position: a parking-orbit point sampled along the launch
+        # azimuth so that a burn aimed at the aim point yields a closing geometry.
+        rhat = self.r0 / max(np.linalg.norm(self.r0), 1e-6)
+        r_deorbit = r_park * rhat
+
+        # Velocity on a collision course toward the aim point, scaled to the
+        # parking speed and reduced by the retrograde deorbit fraction so the RV
+        # leaves orbit and descends. The aim point is on the surface, so this
+        # naturally carries a downward component.
+        to_aim = self._aim_point - r_deorbit
+        to_aim_unit = to_aim / max(np.linalg.norm(to_aim), 1e-6)
+        v_deorbit = v_park * (1.0 - self.deorbit_dv) * to_aim_unit
+
+        guided_times, guided_states = simulate_guided_threat(
+            r_deorbit, v_deorbit, self._aim_point,
+            vehicle=self.vehicle, guidance_law=self.guidance,
+            t0=self._boost_duration + self._coast_duration,
+            t_end=self.metadata.get("engagement_end", 1200.0),
+        )
+
+        all_t = np.concatenate([boost_t, self._boost_duration + coast_t, guided_times])
+        all_s = np.concatenate([
+            np.array(boost_states),
+            np.array(coast_states),
+            guided_states.T,
+        ], axis=0)
+        self._cache = (all_t, all_s)
+        return self._cache
+
     def propagate(self, t: float) -> np.ndarray:
-        if t < self._boost_duration:
-            # Boost: constant thrust + inverse-square gravity.
-            r = self.r0.astype(float).copy()
-            v = self.v0.astype(float).copy()
-            dt = 0.5
-            for _ in range(max(int(t / dt), 1)):
-                a = _two_body_accel(r) + np.array([self.thrust, 0.0, 0.0])
-                v = v + a * dt
-                r = r + v * dt
-        elif t < self._boost_duration + self._coast_duration:
-            # Coast: 2-body orbital motion.
-            tc = t - self._boost_duration
-            r = self.r0 + self.v0 * self._boost_duration
-            v_mag = self._orbital_speed(np.linalg.norm(r))
-            v = v_mag * self.v0 / max(np.linalg.norm(self.v0), 1e-6)
-            r = r + v * tc
-        else:
-            # Reentry: patched-conic with atmospheric drag (exponential model).
-            tc = t - self._boost_duration - self._coast_duration
-            r = np.array([R_EARTH + self._reentry_alt, 0.0, 0.0])
-            v = -self._orbital_speed(R_EARTH) * np.array([0.0, 0.0, 1.0])
-            dt = 0.5
-            pos = r.astype(float).copy()
-            vel = v.astype(float).copy()
-            for _ in range(max(int(tc / dt), 1)):
-                rm = np.linalg.norm(pos)
-                a = _two_body_accel(pos)
-                alt = rm - R_EARTH
-                if alt < 150e3:
-                    rho = 1.225 * np.exp(-alt / 8500.0)
-                    q_dyn = 0.5 * rho * np.dot(vel, vel)
-                    a = a - q_dyn * 0.3 / 100.0 * vel / max(np.linalg.norm(vel), 1e-6)
-                vel = vel + a * dt
-                pos = pos + vel * dt
-            r = pos
-            v = vel
-        return np.concatenate([r, v])
+        all_t, all_s = self._full_trajectory()
+        idx = int(np.searchsorted(all_t, t))
+        idx = min(max(idx, 1), len(all_t) - 1)
+        t0, t1 = all_t[idx - 1], all_t[idx]
+        if abs(t1 - t0) < 1e-9:
+            return all_s[idx]
+        frac = (t - t0) / (t1 - t0)
+        return (1.0 - frac) * all_s[idx - 1] + frac * all_s[idx]
 
     @classmethod
     def from_orbital_params(cls, apoapsis_km: float, inclination_deg: float, launch_site_alt_km: float = 0.0):
@@ -196,6 +434,19 @@ class SuppressedScenario:
     maneuver_interval: float = 30.0
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self):
+        # Maneuver direction: horizontal component of the launch velocity
+        # (threat axis), so midcourse jinking stays aligned with the aim point
+        # rather than a hardcoded +y body axis.
+        vmag = np.linalg.norm(self.v0)
+        if vmag > 1e-6:
+            horiz = self.v0.copy()
+            horiz[2] = 0.0
+            hmag = np.linalg.norm(horiz)
+            self._maneuver_dir = (horiz / hmag) if hmag > 1e-6 else np.array([1.0, 0.0, 0.0])
+        else:
+            self._maneuver_dir = np.array([1.0, 0.0, 0.0])
+
     def propagate(self, t: float) -> np.ndarray:
         # Inverse-square gravity with midcourse delta-v impulses.
         r = self.r0.astype(float).copy()
@@ -208,11 +459,12 @@ class SuppressedScenario:
             a = _two_body_accel(r)
             v = v + a * dt
             r = r + v * dt
-            # Delta-v impulse (velocity change, not addition) at maneuver times.
+            # Delta-v impulse (velocity change, not addition) at maneuver times,
+            # applied along the threat axis (horizontal launch direction).
             if tc > 60.0:
                 m = int(tc / self.maneuver_interval)
                 if m % 2 == 0 and m not in applied:
-                    v = v + self.midcourse_maneuver_mag * np.array([0.0, 1.0, 0.0])
+                    v = v + self.midcourse_maneuver_mag * self._maneuver_dir
                     applied.add(m)
         return np.concatenate([r, v])
 

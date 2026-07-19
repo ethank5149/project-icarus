@@ -141,7 +141,8 @@ class TestEOM:
         assert np.allclose(derivs["r"], v)
 
     def test_force_scaling(self):
-        # Larger mass -> smaller acceleration for the same gravity force.
+        # Gravity is an acceleration (mass-independent); only aero/thrust forces
+        # scale as 1/mass. With no aero/thrust, acceleration is identical.
         eom1 = EOM6DOF(mass=1.0, inertia=np.eye(3))
         eom2 = EOM6DOF(mass=10.0, inertia=np.eye(3))
         base = dict(
@@ -154,7 +155,31 @@ class TestEOM:
             return 0.0, 0.0, 0.0
         d1 = eom1.compute(0.0, {**base, "m": 1.0}, surf)
         d2 = eom2.compute(0.0, {**base, "m": 10.0}, surf)
-        assert np.allclose(d1["v"], 10.0 * d2["v"])
+        assert np.allclose(d1["v"], d2["v"])
+
+    def test_thrust_force_scaling(self):
+        # A thrust force accelerates more lightly-loaded vehicles: a = F/m.
+        eom1 = EOM6DOF(mass=1.0, inertia=np.eye(3))
+        eom2 = EOM6DOF(mass=10.0, inertia=np.eye(3))
+        base = dict(
+            r=np.array([6371e3 + 1e3, 0.0, 0.0]),
+            v=np.zeros(3),
+            q=np.array([1.0, 0.0, 0.0, 0.0]),
+            omega=np.zeros(3),
+        )
+        def thruster(t, state):
+            return np.array([-100.0, 0.0, 0.0])
+        eom1.set_thrust(type("T", (), {"thrust_vector": staticmethod(thruster), "mass_rate": staticmethod(lambda t, s: 0.0)})())
+        eom2.set_thrust(type("T", (), {"thrust_vector": staticmethod(thruster), "mass_rate": staticmethod(lambda t, s: 0.0)})())
+        def surf(mach, alpha, beta, alt):
+            return 0.0, 0.0, 0.0
+        d1 = eom1.compute(0.0, {**base, "m": 1.0}, surf)
+        d2 = eom2.compute(0.0, {**base, "m": 10.0}, surf)
+        # The thrust force (100 N) contributes a = F/m: -100 for m=1, -10 for m=10.
+        # Removing the thrust acceleration from each leaves the identical gravity
+        # acceleration, confirming thrust scales as 1/mass and gravity does not.
+        assert np.allclose(d1["v"] + np.array([100.0, 0.0, 0.0]),
+                            d2["v"] + np.array([10.0, 0.0, 0.0]))
 
     def test_quaternion_norm_preserved(self):
         # Quaternion kinematics must preserve norm: d/dt(q.q) = 2 q.dq = 0.

@@ -16,7 +16,7 @@ def gravity_inertial(r_inertial, use_j2=True, j2=J2, j3=J3, j4=J4):
     alt = r - R_EARTH
     if use_j2 and alt > 50e3:
         z = r_inertial[2]
-        factor = -MU_EARTH / (r**5) * (
+        factor = -MU_EARTH / (r**3) * (
             1.0
             + 1.5 * j2 * (R_EARTH / r) ** 2 * (5.0 * (z / r) ** 2 - 1.0)
             + 0.5 * j3 * (R_EARTH / r) ** 3 * (7.0 * (z / r) ** 3 - 3.0 * (z / r))

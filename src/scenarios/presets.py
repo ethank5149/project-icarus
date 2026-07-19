@@ -69,6 +69,191 @@ def ecef_to_geodetic(r_ecef: np.ndarray) -> Tuple[float, float, float]:
     return float(np.degrees(lat)), float(lon), float(alt)
 
 
+def _enu_basis(lat_deg: float, lon_deg: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return local East/North/Up unit vectors (ECEF) at a geodetic point."""
+    lat = np.radians(lat_deg)
+    lon = np.radians(lon_deg)
+    sin_lat, cos_lat = np.sin(lat), np.cos(lat)
+    sin_lon, cos_lon = np.sin(lon), np.cos(lon)
+    east = np.array([-sin_lon, cos_lon, 0.0])
+    north = np.array([-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat])
+    up = np.array([cos_lat * cos_lon, cos_lat * sin_lon, sin_lat])
+    return east, north, up
+
+
+def _great_circle_azimuth_range_km(
+    lat1: float, lon1: float, lat2: float, lon2: float
+) -> Tuple[float, float]:
+    """Great-circle initial azimuth (deg, 0=N clockwise) and distance (km)."""
+    phi1, phi2 = np.radians(lat1), np.radians(lat2)
+    dlam = np.radians(lon2 - lon1)
+    sin_az = np.sin(dlam) * np.cos(phi2)
+    cos_az = np.cos(phi1) * np.sin(phi2) - np.sin(phi1) * np.cos(phi2) * np.cos(dlam)
+    azimuth = (np.degrees(np.arctan2(sin_az, cos_az)) + 360.0) % 360.0
+    # Angular separation via spherical law of cosines.
+    cos_d = np.sin(phi1) * np.sin(phi2) + np.cos(phi1) * np.cos(phi2) * np.cos(dlam)
+    cos_d = np.clip(cos_d, -1.0, 1.0)
+    dist_km = np.arccos(cos_d) * (R_EARTH / 1000.0)
+    return float(azimuth), float(dist_km)
+
+
+def launch_to_target_velocity(
+    lat_deg: float,
+    lon_deg: float,
+    alt_m: float,
+    az_deg: float,
+    range_km: float,
+    launch_el_deg: float = 45.0,
+) -> Tuple[np.ndarray, float]:
+    """Compute a launch ``v0`` (ECEF) aimed at ``az_deg`` over ``range_km``.
+
+    Uses the flat-Earth maximum-range relation ``R = v0^2 * sin(2*el) / g``
+    evaluated at the local gravitational acceleration, then rotates the
+    resulting velocity vector into the local East/North/Up frame. Returns
+    ``(v0_ecef, speed)``.
+    """
+    el = np.radians(launch_el_deg)
+    rmag = R_EARTH + alt_m
+    g = MU_EARTH / rmag**2
+    sin_2el = np.sin(2.0 * el)
+    if sin_2el < 1e-6:
+        raise ValueError("Launch elevation too close to 0/90 deg.")
+    speed = np.sqrt(g * (range_km * 1000.0) / sin_2el)
+    az = np.radians(az_deg)
+    east, north, up = _enu_basis(lat_deg, lon_deg)
+    horizontal = np.cos(az) * north + np.sin(az) * east
+    direction = np.cos(el) * horizontal + np.sin(el) * up
+    direction = direction / np.linalg.norm(direction)
+    return direction * speed, float(speed)
+
+
+def geodetic_launch_to_target(
+    launch_lat: float,
+    launch_lon: float,
+    launch_alt: float,
+    target_lat: float,
+    target_lon: float,
+    target_alt: float = 0.0,
+    launch_el_deg: float = 45.0,
+    scenario_type: str = "ballistic",
+    use_j2: bool = True,
+    engagement_end: float = 1200.0,
+    **kwargs,
+) -> TargetPreset:
+    """Build a :class:`TargetPreset` launching from a site toward a defended point.
+
+    The trajectory is aimed along the great-circle azimuth to the target. The
+    ``scenario_type`` selects the threat profile:
+
+    - ``"ballistic"``  : ballistic arc; speed from range via flat-Earth max-range.
+    - ``"fobs"``       : fractional-orbit boost to ``apoapsis_km`` then deorbit
+                         steered toward the aim point (reentry phase fixed to use
+                         the true ground aim, not a hardcoded point).
+    - ``"hgv"``        : hypersonic glide inserted at ``glide_alt_km`` with shallow
+                         flight-path angle and ``speed_mach`` (default Mach 12).
+    - ``"suppressed"`` : ballistic arc with midcourse jinking along the threat axis.
+    - ``"swarm"``      : ``n_payloads`` ballistic RVs spread around the bus track.
+
+    This gives physically meaningful threat-vs-defended pairs for trajectory
+    modeling across all scenario families instead of the fixed ``+y`` velocity
+    used by the YAML-derived presets.
+    """
+    scenario_type = scenario_type.lower()
+    az, rng = _great_circle_azimuth_range_km(
+        launch_lat, launch_lon, target_lat, target_lon
+    )
+    r0 = geodetic_to_ecef(launch_lat, launch_lon, launch_alt)
+    target_launch = geodetic_to_ecef(target_lat, target_lon, target_alt)
+
+    if scenario_type == "ballistic":
+        v0, speed = launch_to_target_velocity(
+            launch_lat, launch_lon, launch_alt, az, rng, launch_el_deg
+        )
+        target = BallisticScenario(r0=r0, v0=v0, use_j2=use_j2)
+        speed_note = f"v0 {speed:.0f} m/s"
+
+    elif scenario_type == "fobs":
+        apoapsis_km = kwargs.get("apoapsis_km", 200.0)
+        # Boost to a low orbital speed; the deorbit/steer happens in propagate().
+        rmag = np.linalg.norm(r0)
+        r_apo = R_EARTH + apoapsis_km * 1e3
+        v_mag = np.sqrt(MU_EARTH * (2.0 / rmag - 1.0 / r_apo))
+        v0, _ = launch_to_target_velocity(
+            launch_lat, launch_lon, launch_alt, az, rng, launch_el_deg=5.0
+        )
+        v0 = v0 / np.linalg.norm(v0) * v_mag
+        target = FOBSScenario(
+            r0=r0, v0=v0, apoapsis_km=apoapsis_km
+        )
+        speed_note = f"orbital v0 {v_mag:.0f} m/s, apoapsis {apoapsis_km:.0f} km"
+
+    elif scenario_type == "hgv":
+        glide_alt_km = kwargs.get("glide_alt_km", 70.0)
+        speed_mach = kwargs.get("speed_mach", 12.0)
+        # Insert at glide altitude along the great-circle azimuth, shallow FPA.
+        r0 = geodetic_to_ecef(launch_lat, launch_lon, launch_alt + glide_alt_km * 1000.0)
+        v0, _ = launch_to_target_velocity(
+            launch_lat, launch_lon, launch_alt + glide_alt_km * 1000.0,
+            az, rng, launch_el_deg=kwargs.get("glide_el_deg", 1.0),
+        )
+        speed = speed_mach * 300.0
+        v0 = v0 / np.linalg.norm(v0) * speed
+        target = HGVScenario(
+            r0=r0, v0=v0, max_alt_km=glide_alt_km,
+            lateral_range_km=rng,
+        )
+        speed_note = f"glide v0 {speed:.0f} m/s (Mach {speed_mach:.0f}), alt {glide_alt_km:.0f} km"
+
+    elif scenario_type == "suppressed":
+        v0, speed = launch_to_target_velocity(
+            launch_lat, launch_lon, launch_alt, az, rng, launch_el_deg
+        )
+        target = SuppressedScenario(
+            r0=r0, v0=v0,
+            dip_alt_km=kwargs.get("dip_alt_km", 50.0),
+            midcourse_maneuver_mag=kwargs.get("midcourse_maneuver_mag", 50.0),
+            maneuver_interval=kwargs.get("maneuver_interval", 30.0),
+        )
+        speed_note = f"v0 {speed:.0f} m/s (midcourse jink along threat axis)"
+
+    elif scenario_type == "swarm":
+        v0, speed = launch_to_target_velocity(
+            launch_lat, launch_lon, launch_alt, az, rng, launch_el_deg
+        )
+        n_payloads = kwargs.get("n_payloads", 3)
+        spread_deg = kwargs.get("spread_deg", 1.0)
+        target = SwarmScenario(
+            bus_r0=r0, bus_v0=v0, n_payloads=n_payloads, spread_deg=spread_deg
+        )
+        speed_note = f"bus v0 {speed:.0f} m/s, {n_payloads} RVs, {spread_deg:.1f}° spread"
+
+    else:
+        raise ValueError(
+            f"Unknown scenario_type '{scenario_type}'. "
+            "Expected one of: ballistic, fobs, hgv, suppressed, swarm."
+        )
+
+    engagement = EngagementScenario(
+        engagement_end=engagement_end,
+        target_launch_site=target_launch,
+    )
+    name = (
+        f"{scenario_type}_launch_to_target_"
+        f"{launch_lat:.2f}_{launch_lon:.2f}_->_{target_lat:.2f}_{target_lon:.2f}"
+    )
+    desc = (
+        f"{scenario_type.upper()} launch from ({launch_lat:.2f}, {launch_lon:.2f}) toward "
+        f"({target_lat:.2f}, {target_lon:.2f}): azimuth {az:.1f}°, range {rng:.0f} km, "
+        f"{speed_note}"
+    )
+    return TargetPreset(
+        name=name,
+        target=target,
+        engagement=engagement,
+        description=desc,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Interceptor launch site presets (USA / US Indo-Pacific)
 # ---------------------------------------------------------------------------
@@ -90,6 +275,32 @@ _INTERCEPTOR_PRESETS: Dict[str, np.ndarray] = {
     # Custom geodetic entry point (lat, lon, alt)
     "custom_geodetic": np.zeros(3),
 }
+
+
+def _load_interceptor_presets_from_locations() -> Dict[str, np.ndarray]:
+    """Augment interceptor presets from ``reference/locations.yml``.
+
+    Sites tagged ``designation: interceptor-launch-site`` are merged in using
+    their exact database coordinates, overriding any rough geodetic estimates
+    already present and adding the real-world bases (GMD, Aegis Ashore, THAAD).
+    """
+    from reference.locations import locations_by_designation, coordinates_to_ecef, _sanitize_key
+
+    presets: Dict[str, np.ndarray] = {}
+    groups = locations_by_designation()
+    for rec in groups.get("interceptor-launch-site", []):
+        presets[_sanitize_key(rec["name"])] = coordinates_to_ecef(rec)
+    return presets
+
+
+_INTERCEPTOR_PRESETS.update(_load_interceptor_presets_from_locations())
+
+# The YAML database carries survey-grade coordinates for some sites that also
+# have rough estimates above (e.g. Vandenberg). Keep the precise values and
+# drop the redundant duplicate key the YAML introduced for shared facilities.
+_INTERCEPTOR_PRESETS["vandenberg"] = _INTERCEPTOR_PRESETS.get(
+    "vandenberg_space_force_base", _INTERCEPTOR_PRESETS["vandenberg"]
+)
 
 
 def get_interceptor_presets() -> Dict[str, np.ndarray]:
@@ -426,6 +637,134 @@ _register(
 # Public API
 # ---------------------------------------------------------------------------
 
+# --- Geodetic target presets from reference/locations.yml ---------------
+# Foreign strategic launch complexes (designation: target-launch-site) are
+# registered as ballistic targets using their exact database coordinates.
+# Designated defended targets (designation: defended-target) are registered
+# both as defended-point aim locations and as ballistic targets so they can be
+# used to model threat trajectories toward them.
+
+def _register_from_locations():
+    from reference.locations import (
+        locations_by_designation,
+        coordinates_to_ecef,
+        _sanitize_key,
+    )
+
+    def _ballistic_from_record(rec, v_mag, engagement_end):
+        coord = rec["coordinates"]
+        r0 = geodetic_to_ecef(
+            float(coord["latitude"]),
+            float(coord["longitude"]),
+            float(coord.get("altitude", 0.0)),
+        )
+        v0 = np.array([0.0, v_mag, 0.0])
+        tags = ", ".join(rec.get("tags", [])[:2])
+        return BallisticScenario(r0=r0, v0=v0), tags
+
+    groups = locations_by_designation()
+
+    # Foreign strategic launch complexes -> ballistic target launch sites.
+    # Speed scaled by a rough threat class label so heavy ICBM fields get a
+    # higher-energy launch than smaller/road-mobile garrisons.
+    for rec in groups.get("target-launch-site", []):
+        name = rec["name"]
+        key = "ballistic_target_" + _sanitize_key(name)
+        v_mag = 900.0 if any(
+            t in " ".join(rec.get("tags", [])).lower()
+            for t in ("icbm", "sarmat", "satan", "mirv", "df-41", "df-5", "jl-3", "jl-2")
+        ) else 700.0
+        target, tags = _ballistic_from_record(rec, v_mag, 300.0)
+        _register(
+            key,
+            target,
+            EngagementScenario(engagement_end=300.0),
+            f"Ballistic target from {name} ({tags})",
+        )
+
+    # Defended targets -> usable as defended points and as target trajectories.
+    for rec in groups.get("defended-target", []):
+        name = rec["name"]
+        coord = rec["coordinates"]
+        r0 = geodetic_to_ecef(
+            float(coord["latitude"]),
+            float(coord["longitude"]),
+            float(coord.get("altitude", 0.0)),
+        )
+        tags = ", ".join(rec.get("tags", [])[:2])
+        key = "defended_" + _sanitize_key(name)
+        _register(
+            key,
+            BallisticScenario(r0=r0, v0=np.zeros(3)),
+            EngagementScenario(
+                engagement_end=300.0,
+                target_launch_site=r0,
+            ),
+            f"Defended target: {name} ({tags})",
+        )
+
+    # Curated threat -> defended pairs: each major foreign launch complex is
+    # aimed at a representative high-value US defended target with a real
+    # great-circle azimuth/elevation and range-derived launch speed.
+    _THREAT_TO_DEFENDED = [
+        ("Kozelsk", "Washington D.C."),
+        ("Tatishchevo", "Washington D.C."),
+        ("Dombarovsky / Yasny", "Whiteman AFB"),
+        ("Uzhur", "Minot AFB"),
+        ("Plesetsk Cosmodrome", "NORAD, Peterson SFB"),
+        ("Vypolzovo / Yedrovo", "The Pentagon"),
+        ("Teykovo", "Raven Rock Mountain Complex"),
+        ("Yoshkar-Ola", "Offutt AFB"),
+        ("Novosibirsk", "Malmstrom AFB"),
+        ("Irkutsk", "F.E. Warren AFB"),
+        ("Barnaul", "Naval Station Norfolk"),
+        ("Yumen Silo Field", "Los Angeles"),
+        ("Hami Silo Field", "San Francisco"),
+        ("Ordos Silo Field", "Denver"),
+        ("Luoning Complex", "Kirtland AFB Albuquerque"),
+        ("Longpo Naval Base", "San Diego"),
+        ("Tonghua Garrison", "Naval Base Kitsap"),
+        ("Xiangyang Garrison", "Houston"),
+    ]
+    by_name = {rec["name"]: rec for rec in groups.get("target-launch-site", [])}
+    defended_by_name = {rec["name"]: rec for rec in groups.get("defended-target", [])}
+    # Each curated pair is registered for every scenario family so the database
+    # covers ballistic, FOBS, HGV, suppressed, and swarm threat profiles aimed
+    # at the same defended point.
+    _SCENARIO_VARIANTS = [
+        ("ballistic", {}, ""),
+        ("fobs", {"apoapsis_km": 200.0}, "_fobs"),
+        ("hgv", {"glide_alt_km": 70.0, "speed_mach": 12.0}, "_hgv"),
+        ("suppressed", {}, "_suppressed"),
+    ]
+    for threat_name, defended_name in _THREAT_TO_DEFENDED:
+        if threat_name not in by_name or defended_name not in defended_by_name:
+            continue
+        threat = by_name[threat_name]["coordinates"]
+        defended = defended_by_name[defended_name]["coordinates"]
+        for sc_type, sc_kwargs, suffix in _SCENARIO_VARIANTS:
+            preset = geodetic_launch_to_target(
+                float(threat["latitude"]),
+                float(threat["longitude"]),
+                float(threat.get("altitude", 0.0)),
+                float(defended["latitude"]),
+                float(defended["longitude"]),
+                float(defended.get("altitude", 0.0)),
+                launch_el_deg=45.0,
+                scenario_type=sc_type,
+                engagement_end=1200.0,
+                **sc_kwargs,
+            )
+            key = (
+                f"threat_{_sanitize_key(threat_name)}_to_"
+                f"{_sanitize_key(defended_name)}{suffix}"
+            )
+            _register(key, preset.target, preset.engagement, preset.description)
+
+
+_register_from_locations()
+
+
 def get_target_presets() -> Dict[str, TargetPreset]:
     """Return a copy of all registered target presets."""
     return dict(_TARGET_PRESETS)
@@ -462,4 +801,48 @@ def set_target_geodetic(
         target=target,
         engagement=engagement,
         description=f"Custom geodetic target ({lat_deg}°, {lon_deg}°, {alt_m} m)",
+    )
+
+
+def build_threat_to_defended(
+    threat_name: str,
+    defended_name: str,
+    launch_el_deg: float = 45.0,
+    scenario_type: str = "ballistic",
+    engagement_end: float = 1200.0,
+    **kwargs,
+) -> TargetPreset:
+    """Build a threat-vs-defended :class:`TargetPreset` from the locations DB.
+
+    Looks up ``threat_name`` (a ``target-launch-site``) and ``defended_name`` (a
+    ``defended-target``) in ``reference/locations.yml`` and returns a target
+    whose ``v0`` is aimed along the great-circle azimuth toward the defended
+    point. ``scenario_type`` selects the threat profile (``ballistic``,
+    ``fobs``, ``hgv``, ``suppressed``, ``swarm``); extra scenario parameters are
+    passed via ``kwargs``. This is the modeling entry point for end-to-end
+    threat trajectories; the curated ``threat_*_to_*`` presets use the same
+    machinery.
+    """
+    from reference.locations import locations_by_designation
+
+    groups = locations_by_designation()
+    by_name = {rec["name"]: rec for rec in groups.get("target-launch-site", [])}
+    defended_by_name = {rec["name"]: rec for rec in groups.get("defended-target", [])}
+    if threat_name not in by_name:
+        raise KeyError(f"Unknown threat launch site: {threat_name}")
+    if defended_name not in defended_by_name:
+        raise KeyError(f"Unknown defended target: {defended_name}")
+    threat = by_name[threat_name]["coordinates"]
+    defended = defended_by_name[defended_name]["coordinates"]
+    return geodetic_launch_to_target(
+        float(threat["latitude"]),
+        float(threat["longitude"]),
+        float(threat.get("altitude", 0.0)),
+        float(defended["latitude"]),
+        float(defended["longitude"]),
+        float(defended.get("altitude", 0.0)),
+        launch_el_deg=launch_el_deg,
+        scenario_type=scenario_type,
+        engagement_end=engagement_end,
+        **kwargs,
     )
