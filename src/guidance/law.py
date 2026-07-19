@@ -7,7 +7,8 @@ from ..interceptors.config import InterceptorConfig, GuidanceConfig
 from ..guidance.boost_guidance import BoostGuidance
 from ..guidance.midcourse_guidance import MidcourseGuidance
 from ..guidance.terminal_guidance import TerminalGuidance
-from ..guidance.seeker import SeekerModel, SeekerConfig
+from ..guidance.seeker import SeekerModel, SeekerConfig, DiscriminationModel
+from ..scenarios.target_factory import ThreatSignatureLibrary
 
 
 @dataclass
@@ -51,6 +52,15 @@ class GuidanceLaw:
             self.seeker = SeekerModel(seeker_cfg)
         else:
             self.seeker = None
+        # Calibrated RV-vs-decoy discriminator (2C.2), trained from the default
+        # OSINT-approximate threat signature library.
+        lib = ThreatSignatureLibrary.default()
+        X, y = lib.labelled_matrix()
+        self.discriminator = DiscriminationModel().calibrate(X, y)
+
+    def discriminate_target(self, features: np.ndarray) -> bool:
+        """Return True if ``features`` is more likely an RV than a decoy."""
+        return self.discriminator.is_rv(np.asarray(features, dtype=float))
 
     @classmethod
     def from_dict(cls, d: dict) -> "GuidanceLaw":

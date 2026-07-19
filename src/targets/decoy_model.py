@@ -1,4 +1,5 @@
 import numpy as np
+from typing import Optional
 
 MU_EARTH = 3.986004418e14
 R_EARTH = 6371e3
@@ -54,3 +55,17 @@ class DecoyModel:
             v = v + a * dt
             r = r + v * dt
         return r, v
+
+    def discrimination_features(self, rng: Optional["np.random.Generator"] = None):
+        """Return a 4-feature vector [RCS_bias, IR_flux, Doppler_width,
+        micro_motion_flag] consistent with ``guidance.seeker.DiscriminationModel``.
+
+        Decoys are dimmer (low RCS/IR), slower-closing (narrow Doppler) and
+        lack the tumbling micro-motion of a re-entering RV.
+        """
+        rng = rng or np.random.default_rng(0)
+        rcs = self.radar_rcs_bias + rng.normal(0.0, 0.1)
+        ir = self.ir_bias + rng.normal(0.0, 0.1)
+        doppler = 35.0 + rng.normal(0.0, 5.0)
+        micro = 0.0 if rng.random() < 0.8 else 1.0
+        return np.array([rcs, ir, doppler, micro])

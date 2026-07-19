@@ -15,12 +15,13 @@ The terminal phase is supported by a selectable guidance backend (classic / augm
 - **Quaternion attitude** with normalization and norm-preserving kinematics.
 - **Frame convention**: `v` is inertial; aerodynamic/gravity forces are evaluated in the body frame and rotated body→inertial (`R_b2i @ F_body`) before dividing by mass. Drag opposes velocity.
 - **Regime toggle**: endo-atmospheric (drag + aero coefficients) vs exo-atmospheric (Newtonian, zero drag) with a smooth cosine taper at 100 km.
-- **Gravity**: inverse-square law with a J2 toggle (active above ~50 km; J3/J4 included but currently contribute only through the J2 factor term).
+- **Gravity**: inverse-square law with independent J2/J3/J4 zonal-harmonic terms (`gravity_inertial`, active above ~50 km; all zonal terms disabled together by `use_j2=False`). Higher-order EGM2008 and third-body tides are not yet modeled.
 - **Atmosphere**: US Standard Atmosphere 1976 piecewise layers (0–100 km, barometric with per-layer lapse rate) and a realistic thermosphere above 100 km (temperature relaxes 200 K → 500 K, exponential density with ~50 km scale height, Sutherland viscosity).
 - **Thrust/MKV**: `Isp`-based mass flow (`mdot = -T / (Isp·g0)`), gimbaled thrust vector with first-order gimbal-rate limits, stage-separation impulses with optional spin, and MKV spring-ejection separation (relative velocity along bus x-axis) with 85 N gimbaled divert thrusters.
 
 ### Surrogate Modeling
 - **Multi-output GPR** with composite kernels (`RBF + WhiteKernel`), outputs **Cd, Cy, Cm** (body-axis: drag, side force, pitch moment).
+- **In-repo aero generation** (`aero/geometry.py`, `aero/cfd_generators.py`): parametric geometry (cone-cylinder-fin + control surfaces) and a DOLFINx 0.9.0 CFD sweep driver producing Cd/Cy/Cm tables; SU2/OpenFOAM are optional pluggable backends (not installed).
 - **Analytical post-processing**: `Cn` (yaw moment) and `Cl_roll` (roll moment) plus damping derivatives are computed analytically from Newtonian/linear-viscous models, not from the GPR.
 - **Coefficient convention** (standard missile/aircraft body axis, x-forward / y-right / z-down):
   - `Cd` — drag (−x body), `Cy` — side force (+y body), `Cm` — pitch moment (about +y)
@@ -43,10 +44,10 @@ The terminal phase is driven by `TerminalGuidance` (`src/guidance/terminal_guida
 - **`zem`** — zero-effort-miss guidance; steers `ZEM = z + t_go·ż` (linear, constant-closing-speed) to null with a navigation-ratio gain, `t_go` from range / |Vc|.
 - **`sdre_mpc`** — SDRE-based MPC-lite: finite-horizon LQR on the linearized relative double-integrator kinematics, closed-form gain `K = [√2·√(q/r)·t_go·I, √(qv/r)·t_go·I]`.
 
-`SeekerModel` (`src/guidance/seeker.py`) models an active/semi-active radar or imaging-IR seeker: noisy LOS (az/el) measurements with glint, Poisson-gated clutter, RCS scintillation, and one-frame latency; a cosine-cone FOV/gimbal mask; and a self-contained Unscented Kalman Filter (P-scaled Merwe sigma points) that tracks relative position/velocity and returns a smoothed LOS rate. When a seeker is attached, `runner.py` advances it each terminal step and feeds the UKF LOS rate into the selected backend via `commanded_accel_seeker(...)`; otherwise it falls back to the analytic PN law. `DiscriminationModel` provides calibrated RV-vs-decoy class-conditional Gaussian likelihoods over `[RCS_bias, IR_flux, Doppler_width, micro_motion_flag]` (micro-motion is Bernoulli), with `calibrate()` re-estimation from labelled data and a `log_likelihood_ratio` / `is_rv` decision.
+`SeekerModel` (`src/guidance/seeker.py`) models an active/semi-active radar or imaging-IR seeker: noisy LOS (az/el) measurements with glint, Poisson-gated clutter, RCS scintillation, and one-frame latency; a cosine-cone FOV/gimbal mask; and a self-contained Unscented Kalman Filter (P-scaled Merwe sigma points) that tracks relative position/velocity and returns a smoothed LOS rate. When a seeker is attached, `runner.py` advances it each terminal step and feeds the UKF LOS rate into the selected backend via `commanded_accel_seeker(...)`; otherwise it falls back to the analytic PN law. `DiscriminationModel` provides calibrated RV-vs-decoy class-conditional Gaussian likelihoods over `[RCS_bias, IR_flux, Doppler_width, micro_motion_flag]` (micro-motion is Bernoulli), with `calibrate()` re-estimation from labelled data and a `log_likelihood_ratio` / `is_rv` decision. Every `GuidanceLaw` ships a discriminator pre-calibrated from `ThreatSignatureLibrary.default()` (OSINT-approximate RV/decoy samples), exposed via `GuidanceLaw.discriminate_target(features)`. During a terminal engagement the runner feeds any decoy feature vectors through this discriminator so the interceptor can prefer the RV contact.
 
 ### End-to-End Simulation
-- **Target families**: ballistic, FOBS (2-body patched conic), HGV (skip-glide), suppressed (deep dip + evasion), swarm (clustered RVs).
+- **Target families**: ballistic, FOBS (2-body patched conic), HGV (skip-glide), suppressed (deep dip + evasion), swarm (clustered RVs), and `DecoyThreatScenario` (RV + released decoys with `decoy_features()` compatible with `DiscriminationModel`). `ThreatSignatureLibrary` (2C.2) holds OSINT-approximate RV/decoy signature samples for discrimination training.
 - **Separate-object architecture**: `InterceptorConfig`, `GuidanceLaw`, `TargetScenario`, `EngagementScenario`.
 - **Monte Carlo runner**: adaptive `scipy.integrate.RK45` closed-loop integration with guidance loop; initial `v0` computed from launch-site / threat-axis geometry. State perturbations applied to position, velocity, and mass.
 - **Batch sweep**: `run_sweep()` over interceptor × target × scenario grids with optional `joblib` parallelization.
@@ -71,6 +72,8 @@ The terminal phase is driven by `TerminalGuidance` (`src/guidance/terminal_guida
 src/
 ├── aero/
 │   ├── generate_aero_data.py
+│   ├── geometry.py
+│   ├── cfd_generators.py
 │   ├── aero_analytical.py
 ├── dynamics/
 │   ├── eom_6dof.py
@@ -139,13 +142,11 @@ requirements.txt
 # Activate environment
 source /config/miniconda3/bin/activate .conda-venv
 
-# 1. Generate aerodynamic coefficients
+# (Optional) Generate aerodynamic coefficients / train the GPR surrogate
 python src/aero/generate_aero_data.py
-
-# 2. Train surrogate model
 python src/surrogates/train_gpr.py
 
-# 3. Run tests (exclude the Dymos optimization suite; see Limitations)
+# Run the test suite (the Dymos optimization suite is excluded; see Limitations)
 python -m pytest tests/ -v --ignore=tests/test_dymos.py
 ```
 
@@ -228,22 +229,20 @@ Each preset uses OSINT-approximate parameters (illustrative research defaults, n
 
 ### Known limitations
 - **Dymos optimization suite is not runnable.** `tests/test_dymos.py` is excluded from CI. `src/optimization/trajectory_optimization.py` uses a Dymos API invocation (`num_nodes` option) that no longer matches the installed Dymos/OpenMDAO version, and the engagement `runner.py` is not yet wired in as a callable ODE for the optimizer. The per-phase ODE components (`boost_phase.py`, `midcourse_phase.py`, `terminal_phase.py`) import and run, but the top-level problem assembly fails.
-- **Aero surrogate is synthetic.** GPR is trained on analytical `blended_aero` data, not real wind-tunnel/CFD databases (DATCOM, CBA, FEniCS/DOLFINx). `Cn` and `Cl_roll` are analytic by design and bypass the GPR.
-- **Guidance coupling is staged by time**, not by true event detection. `runner.py` switches boost→midcourse→terminal at fixed `t` thresholds (60 s / 180 s) rather than detecting thrust cutoff / dry mass / altitude as the plan specifies.
-- **MKV / stage-separation events are modeled but not injected into the runner integration loop.** `StageSeparation` and `MKVSystem` exist and are unit-capable, but the RK45 runner does not yet check `eom.separations`/`eom.mkv` at each step to apply impulses and mass drops.
-- **J3/J4 are not independently active.** They appear only inside the J2 gravity factor term; they are not applied as separate spherical-harmonic perturbations.
+- **Aero surrogate default data is synthetic.** `train_gpr.py` trains on analytical `blended_aero` by default; in-repo CFD generation (`aero/geometry.py`, `aero/cfd_generators.py`, DOLFINx 0.9.0) is available but not yet auto-wired to the GPR. `Cn` and `Cl_roll` are analytic by design and bypass the GPR.
+- **Phase transitions** are event-driven (not time-based): `ThrustCutoffEvent` (thrust ≈ 0 or `m ≤ dry_mass`) ends boost; `ReentryEvent` (`alt < boundary`) / `RangeEvent` (`range < threshold`) enter terminal. A `t_max` safety cap still applies.
+- **MKV / stage-separation events** are injected into the RK45 step loop: `InterceptorConfig._separations` builds `StageSeparation` impulses from multi-stage timing, and `_integrate_trajectory` applies mass drops and Δv/spin at each crossing.
+- **Zonal gravity** — `gravity_inertial` applies independent J2/J3/J4 spherical-harmonic zonal terms (all disabled together by `use_j2=False`); higher-order EGM2008 terms and third-body/Sun-Moon tides are not yet modeled.
 - **Thrust model** — interceptor presets now use true multi-stage `StageSpec` sequencing (Arrow-3 2-stage, GMD 3-stage); the legacy `EOM6DOF.thrust_profile` scalar path remains for ad-hoc configs.
 - **Atmosphere thermosphere** uses a fixed solar-activity factor (500 K exobase); no real F10.7/ap indexing.
-- **Decoy/target discrimination** — `DiscriminationModel` (RV-vs-decoy Gaussian class-conditionals over RCS bias / IR flux / Doppler width / micro-motion) is now calibrated-capable via `calibrate()`; OSINT-approximate priors are illustrative, not flight-rated.
+- **Decoy/target discrimination** — `DiscriminationModel` is calibrated-capable via `calibrate()` and every `GuidanceLaw` ships a discriminator pre-trained on `ThreatSignatureLibrary.default()`; OSINT-approximate priors are illustrative, not flight-rated.
 
 ### Remaining steps (post physics-fidelity plan)
 1. **Wire Dymos problem assembly** to the current OpenMDAO API (`num_nodes` → phase transcription) and integrate `EngagementRunner` as the terminal-phase ODE so the optimizer can minimize miss distance.
-2. **Event-driven phase transitions** in `runner.py`: detect boost→midcourse on `thrust < threshold` or `m < dry_mass`; midcourse→terminal on `altitude < 100 km` / `range < 50 km` / MKV separation.
-3. **Inject separation / MKV events** into the RK45 step loop (apply mass drops and velocity/attitude impulses at `t` crossings).
-4. **Calibrate aero** against a real database or FEniCS-generated training data; add analytic GPR Jacobian derivatives (complex-step already used for OpenMDAO partials).
-5. **Independent J3/J4** spherical-harmonic terms, and solar-activity-driven thermosphere.
-6. **WGS84 altitude** in the EOM already uses Bowring's method; extend gravity-gradient torque and inertial→geodetic routines for full WGS84 geopotential.
-7. **Threat library** — expand `DiscriminationModel` priors per real threat signatures (2C.2); add decoy/`decoy_model.py` bodies to target families and exercise the threat discrimination loop end-to-end.
+2. **Calibrate aero** against a real database or FEniCS-generated training data; add analytic GPR Jacobian derivatives (complex-step already used for OpenMDAO partials).
+3. **Higher-order gravity** — EGM2008 higher-order terms, third-body (Sun/Moon) and solid-Earth tides; solar-activity-driven thermosphere (NRLMSISE-00 / F10.7/ap).
+4. **WGS84 altitude** in the EOM already uses Bowring's method; extend gravity-gradient torque and inertial→geodetic routines for full WGS84 geopotential.
+5. **Threat library** — expand `ThreatSignatureLibrary` with more per-class samples (boosted/MBV RVs, advanced decoys) and fold real threat signatures into the `GuidanceLaw` discriminator; add maneuvering-RV aero to target families.
 
 ## Safety & Defense Context
 

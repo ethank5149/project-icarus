@@ -289,6 +289,18 @@ def _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom, thrust_fn,
             seeker = getattr(guidance_law, "seeker", None)
             if seeker is not None:
                 los_rate = seeker.update_tracker(eom_state, {"r": target_r, "v": target_v})
+                # 2C: when the target carries decoys, score them with the RV/decoy
+                # discriminator; the interceptor prefers the contact classified as
+                # the RV (the guidance law continues homing the true RV state).
+                _disc = getattr(guidance_law, "discriminate_target", None)
+                _tgt_scenario = getattr(guidance_law, "_target_scenario", None)
+                if _disc is not None and _tgt_scenario is not None:
+                    feats = getattr(_tgt_scenario, "decoy_features", None)
+                    if feats is not None:
+                        for f in feats(t, seed=guidance_law.config.seeker_noise_seed):
+                            guidance_law._decoy_rejects = getattr(
+                                guidance_law, "_decoy_rejects", 0
+                            ) + (0 if _disc(f) else 1)
                 accel_cmd = guidance_law.terminal.commanded_accel_seeker(
                     eom_state, {"r": target_r, "v": target_v}, los_rate=los_rate
                 )
@@ -352,6 +364,11 @@ def _integrate_trajectory(interceptor, guidance_law, target, scenario, perturb=N
 
     t_span = [scenario.engagement_start, scenario.engagement_end]
     target_fn = lambda t: target.propagate(t)
+
+    # Expose the target scenario so the terminal seeker can run RV/decoy
+    # discrimination (2C) and the event evaluator can read target state.
+    guidance_law._target_scenario = target
+    guidance_law._decoy_rejects = 0
 
     # Reset event-driven phase state on the RHS function object.
     _closed_loop_rhs._phase = "boost"

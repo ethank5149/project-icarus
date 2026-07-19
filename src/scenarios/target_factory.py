@@ -566,6 +566,90 @@ class SwarmScenario:
 
 
 @dataclass
+class ThreatSignatureLibrary:
+    """OSINT-approximate threat signatures for discrimination training (2C.2).
+
+    Each entry is a labelled 4-feature sample
+    ``[RCS_bias, IR_flux, Doppler_width, micro_motion_flag]`` for an RV (+1) or
+    decoy (0). These are illustrative research defaults, NOT controlled data,
+    and are consumed by ``guidance.seeker.DiscriminationModel.calibrate``.
+    """
+
+    rv_samples: List[np.ndarray] = field(default_factory=list)
+    decoy_samples: List[np.ndarray] = field(default_factory=list)
+
+    @classmethod
+    def default(cls, n: int = 40, seed: int = 0) -> "ThreatSignatureLibrary":
+        rng = np.random.default_rng(seed)
+        # RVs: bright, high Doppler, strong micro-motion.
+        rv = np.column_stack([
+            rng.normal(0.4, 0.15, n),
+            rng.normal(1.6, 0.20, n),
+            rng.normal(75.0, 8.0, n),
+            rng.choice([0.0, 1.0], n, p=[0.2, 0.8]),
+        ])
+        # Decoys: dim, low Doppler, often no micro-motion.
+        decoy = np.column_stack([
+            rng.normal(-0.4, 0.12, n),
+            rng.normal(0.6, 0.18, n),
+            rng.normal(35.0, 7.0, n),
+            rng.choice([0.0, 1.0], n, p=[0.85, 0.15]),
+        ])
+        return cls(rv_samples=[r for r in rv], decoy_samples=[r for r in decoy])
+
+    def labelled_matrix(self) -> tuple:
+        """Return ``(features_matrix, labels)`` for calibration."""
+        X = np.array(self.rv_samples + self.decoy_samples, dtype=float)
+        y = np.array([1] * len(self.rv_samples) + [0] * len(self.decoy_samples))
+        return X, y
+
+
+@dataclass
+class DecoyThreatScenario:
+    """Threat with one or more decoys released alongside the RV (2C.1).
+
+    ``propagate`` returns the RV 6-vector; ``decoy_states`` returns the live
+    decoy states (or None before release). The interceptor's seeker feeds the
+    decoy feature vectors into ``DiscriminationModel`` to select the RV.
+    """
+
+    target_type: str = "decoy_threat"
+    rv: Any = field(default_factory=lambda: BallisticScenario())
+    decoys: List[Any] = field(default_factory=list)
+    release_t: float = 200.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        from ..targets.decoy_model import DecoyModel
+        built = []
+        for d in self.decoys:
+            if isinstance(d, DecoyModel):
+                built.append(d)
+            elif isinstance(d, dict):
+                built.append(DecoyModel(**d))
+        self.decoys = built
+
+    def propagate(self, t: float) -> np.ndarray:
+        return self.rv.propagate(t)
+
+    def _release_decoys(self, t: float):
+        if t >= self.release_t:
+            rv_state = self.rv.propagate(t)
+            for d in self.decoys:
+                if not d.active:
+                    d.release(t, r=rv_state[:3].copy(), v=rv_state[3:].copy())
+
+    def decoy_states(self, t: float) -> List[Optional[np.ndarray]]:
+        self._release_decoys(t)
+        return [d.state_at(t) for d in self.decoys]
+
+    def decoy_features(self, t: float, seed: int = 0) -> List[np.ndarray]:
+        self._release_decoys(t)
+        rng = np.random.default_rng(seed)
+        return [d.discrimination_features(rng) for d in self.decoys]
+
+
+@dataclass
 class EngagementScenario:
     """Scenario definition for an engagement."""
     name: str = "Default"
