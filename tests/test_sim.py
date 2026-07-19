@@ -190,7 +190,14 @@ class TestEngagementRunner:
         interceptor = InterceptorConfig(name="Test", mass=1000.0)
         guidance = GuidanceLaw()
         target = BallisticScenario(r0=np.array([R_EARTH, 0.0, 0.0]), v0=np.array([0.0, 1000.0, 0.0]))
-        scenario = EngagementScenario(engagement_end=60.0)
+        # Launch from 100 km altitude so the coasting interceptor leaves the
+        # dense lower atmosphere (the surface-skimming regime is numerically
+        # stiff and slow); this keeps the smoke test fast while exercising the
+        # full event-driven pipeline.
+        scenario = EngagementScenario(
+            interceptor_launch_site=np.array([R_EARTH + 100e3, 0.0, 0.0]),
+            engagement_end=60.0,
+        )
         runner = EngagementRunner(interceptor=interceptor, guidance=guidance, target=target, scenario=scenario)
         result = runner.run(n_trials=5)
         assert isinstance(result.miss_distance, float)
@@ -209,11 +216,13 @@ class TestEngagementRunner:
         assert np.allclose(v0, [1500.0, 0.0, 0.0])
 
     def test_monte_carlo_perturbation(self):
-        rng = np.random.default_rng(0)
         interceptor = InterceptorConfig(name="Test", mass=1000.0)
         guidance = GuidanceLaw()
         target = BallisticScenario(r0=np.array([R_EARTH, 0.0, 0.0]), v0=np.array([0.0, 1000.0, 0.0]))
-        scenario = EngagementScenario(engagement_end=60.0)
+        scenario = EngagementScenario(
+            interceptor_launch_site=np.array([R_EARTH + 100e3, 0.0, 0.0]),
+            engagement_end=60.0,
+        )
         runner = EngagementRunner(interceptor=interceptor, guidance=guidance, target=target, scenario=scenario)
         result = runner.run(n_trials=3, perturbations={"position_sigma": 50.0, "velocity_sigma": 2.0})
         assert result.monte_carlo is not None

@@ -209,16 +209,69 @@ class BallisticScenario:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def propagate(self, t: float) -> np.ndarray:
-        # Keplerian two-body propagation (forward Euler, fine for short arcs).
-        r = self.r0.astype(float).copy()
-        v = self.v0.astype(float).copy()
-        dt = 0.5
-        n = max(int(t / dt), 1)
-        for _ in range(n):
-            a = _two_body_accel(r, use_j2=self.use_j2)
-            v = v + a * dt
-            r = r + v * dt
-        return np.concatenate([r, v])
+        # Closed-form two-body propagation via the universal-variable Kepler
+        # algorithm. This is O(1) in t (a single Kepler solve per call) rather
+        # than a per-step loop, which matters because ``propagate`` is invoked
+        # thousands of times per engagement (once per integrator step). The J2
+        # perturbation is intentionally ignored here for speed; the threat
+        # trajectory is a kinematic reference path fed into the closed-loop RHS.
+        return _kepler_propagate(self.r0.astype(float), self.v0.astype(float), t, MU_EARTH)
+
+
+def _kepler_propagate(r0, v0, t, mu):
+    """Universal-variable Kepler propagation of a two-body state to time ``t``."""
+    r0 = np.asarray(r0, dtype=float)
+    v0 = np.asarray(v0, dtype=float)
+    rmag = np.linalg.norm(r0)
+    vmag = np.linalg.norm(v0)
+    if rmag < 1e-9 or abs(t) < 1e-12:
+        return np.concatenate([r0, v0])
+
+    energy = vmag**2 / 2.0 - mu / rmag
+    a = -mu / (2.0 * energy)
+    sqrt_mu = np.sqrt(mu)
+    rv = np.dot(r0, v0)
+    # Initial guess for universal anomaly chi.
+    if a > 0:
+        chi = sqrt_mu * t / a
+    else:
+        chi = np.sign(t) * np.sqrt(-a) * np.log(
+            max(1.0 + abs(t) * np.sqrt(-energy) / rmag, 1e-12)
+        )
+
+    psi = chi**2 / a
+    c2 = (1.0 - np.cos(np.sqrt(psi))) / psi if psi > 1e-9 else 0.5
+    c3 = (np.sqrt(psi) - np.sin(np.sqrt(psi))) / np.power(psi, 1.5) if psi > 1e-9 else 1.0 / 6.0
+
+    for _ in range(100):
+        r = (r0.dot(r0) / rmag + chi * (rv / sqrt_mu + chi * c2) +
+             a * (1.0 - psi * c3))
+        if abs(r) < 1e-9:
+            break
+        chi_next = chi + (sqrt_mu * t - chi**3 * c3 - rv / sqrt_mu * chi**2 * c2 -
+                          r0.dot(r0) / rmag * chi * (1.0 - psi * c3)) / r
+        # Derivative of c2/c3 w.r.t. psi for Newton correction.
+        if psi > 1e-9:
+            c2 = (1.0 - np.cos(np.sqrt(psi))) / psi
+            c3 = (np.sqrt(psi) - np.sin(np.sqrt(psi))) / np.power(psi, 1.5)
+        else:
+            c2, c3 = 0.5, 1.0 / 6.0
+        dpsi = 2.0 * chi / a * (chi_next - chi)
+        c2 = (1.0 - np.cos(np.sqrt(psi + dpsi))) / (psi + dpsi) if (psi + dpsi) > 1e-9 else 0.5
+        c3 = (np.sqrt(psi + dpsi) - np.sin(np.sqrt(psi + dpsi))) / np.power(psi + dpsi, 1.5) if (psi + dpsi) > 1e-9 else 1.0 / 6.0
+        if abs(chi_next - chi) < 1e-9:
+            chi = chi_next
+            break
+        chi = chi_next
+
+    f = 1.0 - chi**2 / rmag * c2
+    g = t - chi**3 / sqrt_mu * c3
+    r_new = f * r0 + g * v0
+    rmag_new = np.linalg.norm(r_new)
+    f_dot = sqrt_mu / (rmag * rmag_new) * chi * (psi * c3 - 1.0)
+    g_dot = 1.0 - chi**2 / rmag_new * c2
+    v_new = f_dot * r0 + g_dot * v0
+    return np.concatenate([r_new, v_new])
 
     @classmethod
     def from_range(cls, range_km: float, launch_az_deg: float = 0.0, launch_el_deg: float = 45.0):

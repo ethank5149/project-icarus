@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+from typing import Callable, List, Optional
 import numpy as np
 from .coordinate_systems import quat_normalize
 
@@ -101,3 +103,112 @@ class ThrustModel:
         if self.mass_flow is not None:
             return -self.mass_flow
         return -T / (self.Isp * G0)
+
+
+@dataclass
+class StageSpec:
+    """Definition of a single rocket stage in a multi-stage vehicle.
+
+    ``thrust`` is the sea-level/instantaneous thrust magnitude (N) as a function
+    of time-since-stage-ignition. ``burn_time`` is the nominal burn duration; the
+    stage is considered burnt out when ``t_stage >= burn_time`` or thrust hits 0.
+    ``wet_mass``/``dry_mass`` bound the propellant mass available for this stage.
+    """
+
+    thrust: Callable[[float], float]
+    burn_time: float
+    wet_mass: float
+    dry_mass: float
+    Isp: float = 250.0
+    gimbal_limits: tuple = (np.radians(15), np.radians(15))
+    gimbal_rate: float = np.radians(30)
+    name: str = "stage"
+
+
+class MultiStageThrustModel:
+    """True multi-stage thrust model with sequential burns and separation.
+
+    Stages burn in order. After a stage's ``burn_time`` elapses (or thrust
+    returns to ~0) the next stage ignites. At each ignition boundary a
+    :class:`StageSeparation` impulse is applied (mass drop + delta-v/spin) via
+    the integrator event loop. Common-bus inertial properties are updated by the
+    caller after each separation so mass flow is consistent.
+    """
+
+    def __init__(self, stages: List[StageSpec], sep_impulse_per_stage: Optional[List[np.ndarray]] = None):
+        if not stages:
+            raise ValueError("MultiStageThrustModel requires at least one stage.")
+        self.stages = stages
+        self.sep_impulse_per_stage = sep_impulse_per_stage or [np.zeros(3) for _ in stages]
+        self._ignition_times: List[float] = []
+        self._current = 0
+        self._compute_ignition_times()
+
+    def _compute_ignition_times(self):
+        self._ignition_times = []
+        t = 0.0
+        for s in self.stages:
+            self._ignition_times.append(t)
+            t += s.burn_time
+
+    @property
+    def total_burn_time(self) -> float:
+        return sum(s.burn_time for s in self.stages)
+
+    def stage_index_at(self, t: float) -> int:
+        """Return the index of the currently-burning (or last-burnt) stage."""
+        idx = 0
+        for i, t0 in enumerate(self._ignition_times):
+            if t >= t0:
+                idx = i
+        return idx
+
+    def thrust(self, t: float, state=None) -> float:
+        idx = self.stage_index_at(t)
+        s = self.stages[idx]
+        t_stage = t - self._ignition_times[idx]
+        if t_stage < 0.0:
+            return 0.0
+        if t_stage > s.burn_time:
+            return 0.0
+        return float(s.thrust(t_stage))
+
+    def thrust_vector(self, t, state, gimbal_angles=None):
+        T = self.thrust(t, state)
+        # Use the active stage's gimbal limits for deflection characterization.
+        idx = self.stage_index_at(t)
+        # Base thrust points along -x body (a convention used throughout the project).
+        if gimbal_angles is None:
+            gimbal_angles = np.zeros(2)
+        pitch, yaw = np.asarray(gimbal_angles, dtype=float)
+        v = np.array([
+            -np.cos(pitch) * np.cos(yaw),
+            np.sin(yaw),
+            np.sin(pitch) * np.cos(yaw),
+        ])
+        return T * v, np.array([pitch, yaw])
+
+    def mass_rate(self, t, state) -> float:
+        T = self.thrust(t, state)
+        if T <= 0.0:
+            return 0.0
+        idx = self.stage_index_at(t)
+        return -T / (self.stages[idx].Isp * G0)
+
+    def separation_for_stage(self, stage_idx: int) -> Optional[StageSeparation]:
+        """Build the separation event that fires when stage ``stage_idx`` burns out."""
+        if stage_idx >= len(self.stages):
+            return None
+        s = self.stages[stage_idx]
+        mass_drop = max(s.wet_mass - s.dry_mass, 0.0)
+        t_sep = self._ignition_times[stage_idx] + s.burn_time
+        return StageSeparation(
+            time=t_sep,
+            mass_drop=mass_drop,
+            impulse=self.sep_impulse_per_stage[stage_idx],
+            separation_delay=0.0,
+        )
+
+    @property
+    def separations(self) -> List[StageSeparation]:
+        return [self.separation_for_stage(i) for i in range(len(self.stages))]

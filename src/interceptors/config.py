@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, Optional, List, Any
 import numpy as np
+
+from ..dynamics.thrust import StageSeparation, MultiStageThrustModel, StageSpec
 
 
 @dataclass
@@ -21,6 +23,43 @@ class InterceptorConfig:
     accel_limit: float = 150.0
     seeker_snr: float = 20.0
     noise_std: float = 0.01
+    # --- Multi-stage support (Phase 1B) ---
+    # When ``stages`` is provided, the runner builds a MultiStageThrustModel and
+    # injects per-stage separations into the integration loop. ``thrust_profile``
+    # (scalar) remains the simple single-stage fallback.
+    stages: Optional[List[StageSpec]] = None
+    sep_impulses: Optional[List[np.ndarray]] = None
+    # Dry mass used by ThrustCutoffEvent to end the boost phase.
+    dry_mass: float = -1.0
+    peak_thrust: float = 0.0
+
+    def __post_init__(self):
+        if self.dry_mass is not None and self.dry_mass < 0 and self.stages:
+            self.dry_mass = sum(s.dry_mass for s in self.stages)
+        if self.peak_thrust <= 0.0 and self.stages:
+            self.peak_thrust = max(
+                float(s.thrust(0.0)) for s in self.stages
+            )
+        if self.peak_thrust <= 0.0 and self.thrust_profile is not None:
+            # Sample a nominal peak for the scalar profile.
+            self.peak_thrust = max(
+                float(self.thrust_profile(t)) for t in (0.0, 0.5, 1.0, 2.0)
+            )
+
+    # --- Wiring accessed by the runner ------------------------------------
+    @property
+    def _thrust_callable(self) -> Optional[Callable]:
+        if self.stages:
+            model = MultiStageThrustModel(self.stages, self.sep_impulses)
+            return model.thrust
+        return self.thrust_profile
+
+    @property
+    def _separations(self) -> List[Any]:
+        if self.stages:
+            model = MultiStageThrustModel(self.stages, self.sep_impulses)
+            return [s for s in model.separations if s is not None]
+        return []
 
 
 @dataclass

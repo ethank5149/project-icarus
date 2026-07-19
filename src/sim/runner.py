@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Callable
 import numpy as np
 from scipy.integrate import RK45
 
@@ -14,7 +14,100 @@ from ..guidance.law import GuidanceLaw
 from ..scenarios.target_factory import TargetScenario
 from ..scenarios.scenario import EngagementScenario
 from ..aero.aero_analytical import blended_aero
+from .config import SimConfig, get_config, logger
 
+
+# ---------------------------------------------------------------------------
+# Phase-transition events (replace the old time-based phase switch)
+# ---------------------------------------------------------------------------
+
+PHASES = ("boost", "midcourse", "terminal")
+
+
+class PhaseEvent:
+    """Base class for an event that can trigger a phase transition.
+
+    ``should_trigger`` inspects the current integration state and returns True
+    when the transition should fire. Subclasses implement domain logic.
+    """
+
+    next_phase: str = "midcourse"
+
+    def __init__(self, next_phase: str = "midcourse"):
+        self.next_phase = next_phase
+
+    def should_trigger(self, t: float, y: np.ndarray, ctx: Dict[str, Any]) -> bool:
+        raise NotImplementedError
+
+
+class ThrustCutoffEvent(PhaseEvent):
+    """Boost -> midcourse when thrust has effectively ended.
+
+    Fires when the instantaneous thrust is below ``frac`` of the peak observed
+    thrust this run OR the vehicle mass has reached its dry mass.
+    """
+
+    def __init__(self, frac: float = 1e-3, next_phase: str = "midcourse"):
+        super().__init__(next_phase)
+        self.frac = frac
+
+    def should_trigger(self, t, y, ctx):
+        peak = ctx.get("peak_thrust", 0.0)
+        if peak > 0.0 and ctx.get("thrust", 0.0) < self.frac * peak:
+            return True
+        dry = ctx.get("dry_mass", -1.0)
+        if dry > 0.0 and y[13] <= dry:
+            return True
+        return False
+
+
+class ReentryEvent(PhaseEvent):
+    """Midcourse -> terminal when altitude drops below ``alt``."""
+
+    def __init__(self, alt: float = 100e3, next_phase: str = "terminal"):
+        super().__init__(next_phase)
+        self.alt = alt
+
+    def should_trigger(self, t, y, ctx):
+        return (np.linalg.norm(y[:3]) - 6371e3) < self.alt
+
+
+class RangeEvent(PhaseEvent):
+    """Midcourse -> terminal when slant range-to-target drops below ``range_``."""
+
+    def __init__(self, range_: float = 50e3, next_phase: str = "terminal"):
+        super().__init__(next_phase)
+        self.range_ = range_
+
+    def should_trigger(self, t, y, ctx):
+        target_state = ctx.get("target_state")
+        if target_state is None:
+            return False
+        return np.linalg.norm(target_state[:3] - y[:3]) < self.range_
+
+
+class SpeedEvent(PhaseEvent):
+    """Midcourse -> terminal once homing-speed regime is reached."""
+
+    def __init__(self, speed: float = 4000.0, next_phase: str = "terminal"):
+        super().__init__(next_phase)
+        self.speed = speed
+
+    def should_trigger(self, t, y, ctx):
+        return np.linalg.norm(y[3:6]) < self.speed
+
+
+def _default_events(cfg: SimConfig):
+    return [
+        ThrustCutoffEvent(frac=cfg.thrust_cutoff_frac, next_phase="midcourse"),
+        ReentryEvent(alt=cfg.reentry_alt, next_phase="terminal"),
+        RangeEvent(range_=cfg.terminal_range, next_phase="terminal"),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Results
+# ---------------------------------------------------------------------------
 
 @dataclass
 class MonteCarloResult:
@@ -98,14 +191,16 @@ class EngagementResult:
             return None
         if ax is None:
             fig, ax = plt.subplots()
-        probs = []
-        for _ in param_values:
-            probs.append(self.monte_carlo.kill_probability)
+        probs = [self.monte_carlo.kill_probability for _ in param_values]
         ax.plot(param_values, probs, marker="o")
         ax.set_xlabel(param_name)
         ax.set_ylabel("Kill Probability")
         return ax
 
+
+# ---------------------------------------------------------------------------
+# Closed-loop RHS: event-driven phase selection
+# ---------------------------------------------------------------------------
 
 def _compute_v0(scenario: EngagementScenario, magnitude: float = 1500.0) -> np.ndarray:
     """Initial interceptor speed from launch site toward threat axis."""
@@ -119,7 +214,30 @@ def _surrogate(mach, alpha, beta, alt):
     return blended_aero(mach, alpha, beta, alt)[:3]
 
 
-def _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom):
+def _current_phase(t, y, phase_events, ctx):
+    """Evaluate which phase is active given the registered transition events.
+
+    Only ONE monotonic transition boost -> midcourse -> terminal is permitted.
+    Boost can leave for midcourse (thrust cutoff); midcourse can leave for
+    terminal (reentry / range / speed). Terminal is terminal. This prevents a
+    launch at sub-terminal speed from spuriously jumping straight to terminal
+    guidance (which would command huge accelerations on a coasting body).
+    """
+    current = ctx.get("phase", "boost")
+    if current == "terminal":
+        return "terminal"
+    for ev in phase_events:
+        if ev.next_phase == current:
+            continue  # a same-phase event is not a transition
+        if current == "boost" and ev.next_phase != "midcourse":
+            continue  # boost must go to midcourse first
+        if ev.should_trigger(t, y, ctx):
+            logger.debug("phase transition %s -> %s at t=%.2f", current, ev.next_phase, t)
+            return ev.next_phase
+    return current
+
+
+def _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom, thrust_fn, peak_thrust):
     r = y[:3]
     v = y[3:6]
     q = y[6:10]
@@ -132,28 +250,47 @@ def _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom):
     target_v = target_state[3:6]
 
     alt = np.linalg.norm(r) - 6371e3
-    if t < 60.0:
-        phase = "boost"
-    elif t < 180.0:
-        phase = "midcourse"
-    else:
-        phase = "terminal"
+
+    # Event-driven phase determination (no time-based switch).
+    ctx = {
+        "phase": getattr(_closed_loop_rhs, "_phase", "boost"),
+        "thrust": float(thrust_fn(t, {"m": m})) if thrust_fn is not None else 0.0,
+        "peak_thrust": peak_thrust,
+        "dry_mass": getattr(eom, "dry_mass", -1.0),
+        "target_state": target_state,
+    }
+    phase = _current_phase(t, y, _closed_loop_rhs._events, ctx)
+    _closed_loop_rhs._phase = phase
+
+    rho = 1.225 * np.exp(-max(alt, 0.0) / 8500.0) if alt < 100e3 else 0.0
 
     eom_state = {"r": r, "v": v, "q": q, "omega": omega, "m": m}
 
     f_thrust = np.zeros(3)
     if phase == "boost":
-        rho = 1.225 * np.exp(-max(alt, 0.0) / 8500.0)
         cmd = guidance_law.boost.commanded_gimbal(t, eom_state, rho, v)
-        thrust_val = interceptor.thrust_profile(t) if interceptor.thrust_profile is not None else 0.0
+        thrust_val = thrust_fn(t, eom_state) if thrust_fn is not None else 0.0
+        # Base thrust along -x body (project convention).
         f_thrust = np.array([-thrust_val, 0.0, 0.0])
-    elif phase == "midcourse":
-        guidance_law.midcourse.update_target(target_state, t)
-        accel_cmd = guidance_law.midcourse.commanded_accel(t, eom_state)
-        f_thrust = accel_cmd * m
     else:
-        accel_cmd = guidance_law.terminal.commanded_accel(t, eom_state, target_state)
-        f_thrust = accel_cmd * m
+        # Midcourse / terminal guidance command an acceleration; realize it only
+        # up to the thrust actually available. An unpowered (coasting) interceptor
+        # cannot accelerate, so the command is inert (no fictitious force). This
+        # also prevents the integrator from stiffening on large PN commands.
+        avail_thrust = float(thrust_fn(t, eom_state)) if thrust_fn is not None else 0.0
+        max_accel_force = avail_thrust if avail_thrust > 0.0 else 0.0
+        if phase == "midcourse":
+            guidance_law.midcourse.update_target(target_state, t)
+            accel_cmd = guidance_law.midcourse.commanded_accel(t, eom_state)
+        else:
+            accel_cmd = guidance_law.terminal.commanded_accel(t, eom_state, target_state)
+        # Convert the acceleration command to a force, capped by available thrust.
+        desired_force = accel_cmd * m
+        f_mag = np.linalg.norm(desired_force)
+        if f_mag > 1e-9 and f_mag > max_accel_force:
+            f_thrust = desired_force * (max_accel_force / f_mag)
+        else:
+            f_thrust = desired_force
 
     derivs = eom.compute(t, eom_state, _surrogate)
     dr_dt = derivs["r"]
@@ -165,7 +302,10 @@ def _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom):
     return np.concatenate([dr_dt, dv_dt, dq_dt, domega_dt, [dm_dt]])
 
 
-def _integrate_trajectory(interceptor, guidance_law, target, scenario, perturb=None):
+def _integrate_trajectory(interceptor, guidance_law, target, scenario, perturb=None,
+                          cfg: Optional[SimConfig] = None, rng=None):
+    cfg = cfg or get_config()
+    rng = rng or cfg.rng
     site = np.asarray(scenario.interceptor_launch_site, dtype=float)
     v0 = _compute_v0(scenario, magnitude=1500.0)
 
@@ -179,11 +319,11 @@ def _integrate_trajectory(interceptor, guidance_law, target, scenario, perturb=N
     if perturb is not None:
         state0 = state0.copy()
         if "position_sigma" in perturb:
-            state0[:3] += np.random.normal(0, perturb["position_sigma"], 3)
+            state0[:3] += rng.normal(0, perturb["position_sigma"], 3)
         if "velocity_sigma" in perturb:
-            state0[3:6] += np.random.normal(0, perturb["velocity_sigma"], 3)
+            state0[3:6] += rng.normal(0, perturb["velocity_sigma"], 3)
         if "mass_sigma" in perturb:
-            state0[13] += np.random.normal(0, perturb["mass_sigma"])
+            state0[13] += rng.normal(0, perturb["mass_sigma"])
 
     eom = EOM6DOF(
         mass=interceptor.mass,
@@ -191,27 +331,66 @@ def _integrate_trajectory(interceptor, guidance_law, target, scenario, perturb=N
         area=interceptor.area,
         ref_length=interceptor.ref_length,
     )
+    eom.dry_mass = getattr(interceptor, "dry_mass", -1.0)
+
+    # Wire the thrust model if the interceptor exposes one (multi-stage or scalar).
+    thrust_fn = getattr(interceptor, "_thrust_callable", None)
+    peak_thrust = float(getattr(interceptor, "peak_thrust", 0.0) or 0.0)
+
+    # Collect separation / MKV events to inject mid-integration.
+    separations = getattr(interceptor, "_separations", []) or []
 
     t_span = [scenario.engagement_start, scenario.engagement_end]
     target_fn = lambda t: target.propagate(t)
 
+    # Reset event-driven phase state on the RHS function object.
+    _closed_loop_rhs._phase = "boost"
+    _closed_loop_rhs._events = _default_events(cfg)
+
     integrator = RK45(
-        lambda t, y: _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom),
-        t_span[0], state0, t_span[1], max_step=0.5, rtol=1e-6, atol=1e-9,
+        lambda t, y: _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom,
+                                      thrust_fn, peak_thrust),
+        t_span[0], state0, min(t_span[1], cfg.t_max),
+        max_step=cfg.max_step, rtol=cfg.rtol, atol=cfg.atol,
     )
 
     times = [integrator.t]
     states = [integrator.y.copy()]
+    applied = set()
+
     while integrator.status == "running":
         integrator.step()
+        t = integrator.t
+        y = integrator.y
+
+        # Inject separation / MKV impulses at their crossing times.
+        for i, sep in enumerate(separations):
+            if i in applied:
+                continue
+            sep_time = getattr(sep, "time", None)
+            if sep_time is None:
+                continue
+            if t >= sep_time or integrator.status != "running":
+                applied.add(i)
+                y = np.array(y, copy=True)
+                y[13] = max(y[13] - sep.mass_drop, 1e-3)
+                y[3:6] = y[3:6] + sep.impulse / max(y[13], 1e-6)
+                if getattr(sep, "spin_impulse", None) is not None:
+                    y[10:13] = y[10:13] + np.asarray(sep.spin_impulse) / max(y[13], 1e-6)
+                # Re-inject as the integrator's current state for the next step.
+                integrator.y = y
+
         times.append(integrator.t)
         states.append(integrator.y.copy())
+
+        if integrator.t >= min(t_span[1], cfg.t_max):
+            integrator.status = "finished"
 
     sol_t = np.array(times)
     sol_y = np.column_stack(states)
 
     r = sol_y[:3, -1]
-    target_final = target_fn(t_span[1])
+    target_final = target_fn(min(t_span[1], cfg.t_max))
     miss = float(np.linalg.norm(r - target_final[:3]))
     kill = guidance_law.terminal.kill_assessment(miss)
 
@@ -232,7 +411,7 @@ def _integrate_trajectory(interceptor, guidance_law, target, scenario, perturb=N
 
 
 class EngagementRunner:
-    """End-to-end engagement simulation runner."""
+    """End-to-end engagement simulation runner (event-driven)."""
 
     def __init__(
         self,
@@ -240,35 +419,35 @@ class EngagementRunner:
         guidance: GuidanceLaw,
         target: TargetScenario,
         scenario: EngagementScenario,
+        cfg: Optional[SimConfig] = None,
     ):
         self.interceptor = interceptor
         self.guidance = guidance
         self.target = target
         self.scenario = scenario
+        self.cfg = cfg or get_config()
 
-    def run(self, n_trials: int = 50, perturbations: Optional[Dict[str, float]] = None) -> EngagementResult:
+    def run(self, n_trials: int = 50, perturbations: Optional[Dict[str, float]] = None,
+            cfg: Optional[SimConfig] = None) -> EngagementResult:
+        cfg = cfg or self.cfg
         if perturbations is None:
-            perturbations = {
-                "position_sigma": 100.0,
-                "velocity_sigma": 5.0,
-                "mass_sigma": 10.0,
-            }
+            perturbations = dict(cfg.perturbations)
+
+        # Dedicated, seedable RNG for this run (does not advance global state).
+        rng = np.random.default_rng(cfg.seed)
 
         nominal_traj, nominal_target_traj, nominal_miss, nominal_kill = _integrate_trajectory(
-            self.interceptor, self.guidance, self.target, self.scenario
+            self.interceptor, self.guidance, self.target, self.scenario,
+            cfg=cfg, rng=rng,
         )
-
-        if nominal_traj is None:
-            nominal_traj = {"t": np.array([0.0, 1.0]), "r": np.zeros((2, 3)), "v": np.zeros((2, 3)),
-                            "q": np.zeros((2, 4)), "omega": np.zeros((2, 3)), "m": np.zeros(2)}
-            nominal_target_traj = {"t": np.array([0.0, 1.0]), "r": np.zeros((2, 3)), "v": np.zeros((2, 3))}
 
         mc_misses = []
         mc_kills = []
         mc_perturbs = []
         for _ in range(n_trials):
             _, _, miss, kill = _integrate_trajectory(
-                self.interceptor, self.guidance, self.target, self.scenario, perturb=perturbations
+                self.interceptor, self.guidance, self.target, self.scenario,
+                perturb=perturbations, cfg=cfg, rng=rng,
             )
             mc_misses.append(miss)
             mc_kills.append(kill)

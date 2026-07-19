@@ -29,9 +29,7 @@ class SwarmScenario(EngagementScenario):
     bus_v0: np.ndarray = field(default_factory=lambda: np.zeros(3))
 
 
-@dataclass
-class SuppressedScenario(EngagementScenario):
-    name: str = "Suppressed"
-    dip_alt_km: float = 50.0
-    midcourse_maneuver_mag: float = 50.0
-    maneuver_interval: float = 30.0
+# The full physics-capable ``SuppressedScenario`` lives in ``target_factory``
+# (it carries midcourse-jink dynamics). Re-export it here so historical imports
+# from ``scenarios.scenario`` continue to resolve to the single source of truth.
+from .target_factory import SuppressedScenario  # noqa: E402,F401
