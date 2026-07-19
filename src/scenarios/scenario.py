@@ -4,13 +4,15 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
 import numpy as np
 
+from ..dynamics.gravity import R_EARTH
+
 
 @dataclass
 class EngagementScenario:
     """Scenario definition for an engagement."""
     name: str = "Default"
-    interceptor_launch_site: np.ndarray = field(default_factory=lambda: np.zeros(3))
-    target_launch_site: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    interceptor_launch_site: np.ndarray = field(default_factory=lambda: np.array([R_EARTH, 0.0, 0.0]))
+    target_launch_site: np.ndarray = field(default_factory=lambda: np.array([R_EARTH, 0.0, 0.0]))
     threat_axis: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0]))
     engagement_start: float = 0.0
     engagement_end: float = 300.0

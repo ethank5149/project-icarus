@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 import numpy as np
-from scipy.integrate import solve_ivp
 
 from ..dynamics.eom_6dof import EOM6DOF
 from ..guidance.boost_guidance import BoostGuidance
@@ -70,7 +69,16 @@ class EngagementResult:
             return None
         if ax is None:
             fig, ax = plt.subplots()
-        ax.hist(self.monte_carlo.miss_distances, bins=30, edgecolor="black", alpha=0.7)
+        misses = np.asarray(self.monte_carlo.miss_distances, dtype=float)
+        finite_mask = np.isfinite(misses)
+        if not np.all(finite_mask):
+            n_bad = int(np.sum(~finite_mask))
+            print(f"Warning: {n_bad} non-finite miss distance(s) excluded from histogram")
+            misses = misses[finite_mask]
+        if misses.size == 0:
+            print("No finite miss distances to plot")
+            return ax
+        ax.hist(misses, bins=30, edgecolor="black", alpha=0.7)
         ax.axvline(self.miss_distance, color="red", linestyle="--", label="Nominal")
         ax.set_xlabel("Miss Distance (m)")
         ax.set_ylabel("Count")
@@ -177,36 +185,43 @@ def _integrate_trajectory(interceptor, guidance_law, target, scenario, perturb=N
     t_span = [scenario.engagement_start, scenario.engagement_end]
     target_fn = lambda t: target.propagate(t)
 
-    sol = solve_ivp(
-        lambda t, y: _closed_loop_ode(t, y, interceptor, guidance_law, target_fn),
-        t_span,
-        state0,
-        method="RK45",
-        max_step=1.0,
-        rtol=1e-6,
-        atol=1e-9,
-    )
+    dt = 0.1
+    t = t_span[0]
+    state = state0.copy()
+    times = [t]
+    states = [state.copy()]
 
-    if not sol.success:
-        return None, None, np.inf, False
+    while t < t_span[1]:
+        step = min(dt, t_span[1] - t)
+        k1 = _closed_loop_ode(t, state, interceptor, guidance_law, target_fn)
+        k2 = _closed_loop_ode(t + step / 2, state + step / 2 * k1, interceptor, guidance_law, target_fn)
+        k3 = _closed_loop_ode(t + step / 2, state + step / 2 * k2, interceptor, guidance_law, target_fn)
+        k4 = _closed_loop_ode(t + step, state + step * k3, interceptor, guidance_law, target_fn)
+        state = state + step / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+        t += step
+        times.append(t)
+        states.append(state.copy())
 
-    r = sol.y[:3, -1]
+    sol_t = np.array(times)
+    sol_y = np.column_stack(states)
+
+    r = sol_y[:3, -1]
     target_final = target_fn(t_span[1])
     miss = float(np.linalg.norm(r - target_final[:3]))
     kill = guidance_law.terminal.kill_assessment(miss)
 
     traj = {
-        "t": sol.t,
-        "r": sol.y[:3, :].T,
-        "v": sol.y[3:6, :].T,
-        "q": sol.y[6:10, :].T,
-        "omega": sol.y[10:13, :].T,
-        "m": sol.y[13, :],
+        "t": sol_t,
+        "r": sol_y[:3, :].T,
+        "v": sol_y[3:6, :].T,
+        "q": sol_y[6:10, :].T,
+        "omega": sol_y[10:13, :].T,
+        "m": sol_y[13, :],
     }
     target_traj = {
-        "t": sol.t,
-        "r": np.array([target_fn(ti)[:3] for ti in sol.t]),
-        "v": np.array([target_fn(ti)[3:] for ti in sol.t]),
+        "t": sol_t,
+        "r": np.array([target_fn(ti)[:3] for ti in sol_t]),
+        "v": np.array([target_fn(ti)[3:] for ti in sol_t]),
     }
     return traj, target_traj, miss, kill
 

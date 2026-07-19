@@ -29,13 +29,14 @@ Inspired by tiered missile defense architectures (Arrow 2/3, David's Sling, Iron
 ### End-to-End Simulation
 - **Target families**: ballistic, FOBS (2-body patched conic), HGV (skip-glide), suppressed (deep dip + evasion), swarm (clustered RVs).
 - **Separate-object architecture**: `InterceptorConfig`, `GuidanceLaw`, `TargetScenario`, `EngagementScenario`.
-- **Monte Carlo runner**: closed-loop `solve_ivp` integration with guidance loop, perturbing initial conditions and parameters.
+- **Monte Carlo runner**: fixed-step RK4 closed-loop integration with guidance loop, perturbing initial conditions and parameters.
 - **Batch sweep**: `run_sweep()` over interceptor × target × scenario grids with optional `joblib` parallelization.
 - **Result API**: `EngagementResult` with built-in 3D trajectory plotting, miss-distance histogram, and kill-probability analysis.
+- **Geodetic presets**: WGS84 coordinate conversion with realistic launch sites (USA interceptor bases, Russia/China target regions).
 
 ### Jupyter Notebooks
 - `notebooks/engagement_sweep.ipynb` — high-level workflow: define configs, run single engagement, run batch sweep, visualize.
-- `notebooks/interactive_dashboard.ipynb` — ipywidgets dashboard with sliders for interceptor mass, kill radius, guidance gain N, target type, and MC trials. Runs engagement on button click and displays 3D trajectory, miss-distance distribution, and kill/no-kill counts.
+- `notebooks/interactive_dashboard.ipynb` — ipywidgets dashboard with preset dropdowns for interceptor launch sites and target regions, geodetic lat/lon/alt inputs, sliders for interceptor mass, kill radius, guidance gain N, and MC trials. Runs engagement on button click and displays 3D trajectory, miss-distance distribution, and kill/no-kill counts.
 
 ## File Structure
 
@@ -69,7 +70,8 @@ src/
 │   └── config.py
 ├── scenarios/
 │   ├── target_factory.py
-│   └── scenario.py
+│   ├── scenario.py
+│   └── presets.py          # Geodetic presets + WGS84 helpers
 ├── sim/
 │   ├── runner.py
 │   ├── sweep.py
@@ -118,30 +120,58 @@ python -m pytest tests/ -v
 ```python
 from src.interceptors.config import InterceptorConfig
 from src.guidance.law import GuidanceLaw
-from src.scenarios.target_factory import FOBSScenario
+from src.scenarios.presets import (
+    interceptor_preset,
+    target_preset,
+    set_interceptor_geodetic,
+    set_target_geodetic,
+)
 from src.scenarios.scenario import EngagementScenario
 from src.sim.api import run_engagement, run_sweep
 
+# Use built-in geodetic presets
 interceptor = InterceptorConfig(name="Arrow 3", mass=1000.0, kill_radius=0.5)
 guidance = GuidanceLaw()
-target = FOBSScenario.from_orbital_params(apoapsis_km=200.0, inclination_deg=30.0)
-scenario = EngagementScenario(engagement_end=300.0)
+launch_site = interceptor_preset("vandenberg")       # 34.7°N, 120.6°W
+preset = target_preset("ballistic_target_moscow")     # 55.8°N, 37.6°E
+scenario = EngagementScenario(
+    interceptor_launch_site=launch_site,
+    **preset.engagement.__dict__,
+)
 
-result = run_engagement(interceptor, guidance, target, scenario, n_trials=50)
+result = run_engagement(interceptor, guidance, preset.target, scenario, n_trials=50)
 print(result.miss_distance, result.kill_assessment)
 result.plot_3d()
 result.plot_miss_distance_distribution()
 
+# Custom geodetic site
+custom_site = set_interceptor_geodetic(28.4, -80.6, 0.0)  # Cape Canaveral
+custom_target = set_target_geodetic(39.9, 116.4, 0.0)     # Beijing
+
 # Batch sweep
 sweep = run_sweep(
     interceptors=[interceptor],
-    targets=[target, ...],
+    targets=[preset.target, custom_target.target, ...],
     scenarios=[scenario, ...],
     n_trials=30,
-    parallel=True,
 )
 df = sweep.to_dataframe()
 ```
+
+### Available Presets
+
+**Interceptor launch sites (USA / US Indo-Pacific):**
+- `vandenberg` — 34.7°N, 120.6°W (CA)
+- `cape_canaveral` — 28.4°N, 80.6°W (FL)
+- `kwajalein` — 8.7°N, 167.7°E (Marshall Islands)
+- `schriever` — 38.8°N, 104.5°W (CO)
+- `fort_greely` — 63.9°N, 147.6°W (AK)
+- `clear_sfs` — 64.3°N, 149.2°W (AK)
+- `custom_geodetic` — user-defined lat/lon/alt via `set_interceptor_geodetic()`
+
+**Target regions (Russia / China):**
+- Russia: `ballistic_target_moscow`, `ballistic_target_novosibirsk`, `ballistic_target_vladivostok`, `ballistic_target_murmansk`, `ballistic_target_yakutsk`
+- China: `ballistic_target_beijing`, `ballistic_target_shanghai`, `ballistic_target_xian`, `ballistic_target_chengdu`, `ballistic_target_urumqi`
 
 ## Safety & Defense Context
 
