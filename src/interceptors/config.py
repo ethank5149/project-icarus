@@ -80,3 +80,14 @@ class GuidanceConfig:
     seeker_snr_db: float = 20.0
     seeker_noise_seed: int = 0
     ukf_enabled: bool = True
+    # --- 2B.2 Guidance backend (terminal phase) ---
+    # "pn"          : classic proportional navigation (default)
+    # "apn"         : augmented PN (gravity-compensated target acceleration bias)
+    # "zem"         : zero-effort-miss / impact-angle guidance
+    # "sdre_mpc"    : SDRE-based MPC-lite (finite-horizon LQR on linearized EOM)
+    terminal_guidance_law: str = "pn"
+    apn_gravity_comp: bool = True
+    zem_horizon: float = 5.0
+    sdre_q_pos: float = 1.0
+    sdre_q_vel: float = 0.1
+    sdre_r_accel: float = 1.0

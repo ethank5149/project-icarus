@@ -245,3 +245,76 @@ class SeekerModel:
         doppler = rng.normal(50.0, 5.0)
         micro = 1.0 if rng.random() < 0.5 else 0.0
         return np.array([rcs, ir, doppler, micro])
+
+
+class DiscriminationModel:
+    """Calibrated multi-feature discrimination (2B.3).
+
+    Maintains Gaussian class-conditional likelihoods for RV vs decoy over the
+    feature vector [RCS_bias, IR_flux, Doppler_width, micro_motion_flag]. The
+    means/covariances are OSINT-approximate priors; micro_motion is treated as
+    a Bernoulli feature (0/1). The model returns a calibrated log-likelihood
+    ratio and a boolean RV decision at a tunable threshold.
+
+    Calibration note: thresholds and covariances are illustrative research
+    defaults, not flight-rated signatures. Tune per threat library (2C.2).
+    """
+
+    def __init__(self, rv_prior=0.5, threshold=0.0, seed=0):
+        self.rv_prior = rv_prior
+        self.decoy_prior = 1.0 - rv_prior
+        self.threshold = threshold
+        self.rng = np.random.default_rng(seed)
+        # Feature means: [RCS_bias, IR_flux, Doppler_width, micro_motion_flag]
+        # RVs: bright, high Doppler, strong micro-motion. Decoys: dim, low
+        # Doppler, often no micro-motion.
+        self._rv_mean = np.array([0.4, 1.6, 75.0, 0.8])
+        self._decoy_mean = np.array([-0.4, 0.6, 35.0, 0.2])
+        self._rv_cov = np.diag([0.25, 0.30, 100.0, 0.16])
+        self._decoy_cov = np.diag([0.25, 0.20, 100.0, 0.16])
+
+    def _log_gauss(self, x, mean, cov):
+        x = np.asarray(x, dtype=float)
+        # Bernoulli handling for the micro-motion flag (last feature).
+        cont = x[:3]
+        flag = x[3]
+        mean_c = mean[:3]
+        var_c = np.diag(cov)[:3]
+        ll = -0.5 * np.sum(((cont - mean_c) ** 2) / var_c + np.log(2 * np.pi * var_c))
+        p_flag = mean[3]  # Bernoulli mean == probability of flag==1
+        p_flag = np.clip(p_flag, 1e-6, 1.0 - 1e-6)
+        ll += np.log(p_flag) if flag >= 0.5 else np.log(1.0 - p_flag)
+        return ll
+
+    def log_likelihood_ratio(self, features):
+        features = np.asarray(features, dtype=float)
+        if features.shape[0] < 4:
+            return 0.0
+        ll_rv = self._log_gauss(features, self._rv_mean, self._rv_cov) + np.log(self.rv_prior)
+        ll_decoy = self._log_gauss(features, self._decoy_mean, self._decoy_cov) + np.log(self.decoy_prior)
+        return float(ll_rv - ll_decoy)
+
+    def is_rv(self, features):
+        return self.log_likelihood_ratio(features) > self.threshold
+
+    def calibrate(self, features_matrix, labels):
+        """Re-estimate class-conditional Gaussian parameters from labelled data.
+
+        features_matrix: (n, 4) array; labels: (n,) 0=decoy, 1=rv. Micro-motion
+        Bernoulli mean is the class fraction with flag==1; covariances are the
+        empirical (diagonal) variances. Returns self for chaining.
+        """
+        features_matrix = np.asarray(features_matrix, dtype=float)
+        labels = np.asarray(labels, dtype=int)
+        for cls, attr in ((1, "_rv"), (0, "_decoy")):
+            mask = labels == cls
+            if not np.any(mask):
+                continue
+            sub = features_matrix[mask]
+            mean = sub.mean(0)
+            var = sub.var(0)
+            var = np.maximum(var, 1e-6)
+            cov = np.diag(var)
+            setattr(self, f"{attr}_mean", mean)
+            setattr(self, f"{attr}_cov", cov)
+        return self

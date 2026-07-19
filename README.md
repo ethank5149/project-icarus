@@ -6,6 +6,8 @@ A high-fidelity, surrogate-based trajectory optimization pipeline for endo- and 
 
 Inspired by tiered missile defense architectures (Arrow 2/3, David's Sling, Iron Dome), it models boost, midcourse, and terminal phases with 6-DOF Newton-Euler dynamics and unit quaternion attitude. An end-to-end simulation engine enables Monte Carlo sweeps over interceptor configurations, guidance laws, and target trajectories including fractional orbital bombardment (FOBS), hypersonic glide vehicles (HGV), suppressed trajectories, and swarms.
 
+The terminal phase is supported by a selectable guidance backend (classic / augmented / zero-effort-miss / SDRE-MPC), a UKF-tracked seeker that closes the guidance loop, a calibrated RV-vs-decoy discrimination model, and realistic interceptor presets (Arrow-3, Tamir, GMD) with uncertainty-quantification sampling.
+
 ## Technical Architecture
 
 ### 6-DOF Dynamics
@@ -29,8 +31,19 @@ Inspired by tiered missile defense architectures (Arrow 2/3, David's Sling, Iron
 ### Trajectory Optimization
 - **Dymos** with **Radau transcription** for discontinuous events (stage separation, MKV sep).
 - Explicit phases: **Boost**, **Midcourse**, **Terminal** with `link_phases` continuity. Each phase ODE uses the shared `EOM6DOF` and `blended_aero` surrogate (passing `boundary_alt` / `surrogate_path` through options).
-- Guidance laws: gravity turn / pitch-over (boost), **true proportional navigation (PN)** with data-link updates (midcourse), PN with seeker FOV check and likelihood-ratio discrimination (terminal).
+- Boost guidance: gravity turn / pitch-over. Midcourse guidance: true proportional navigation (PN) with data-link updates.
 - Kill assessment: hit-to-kill (< 0.5 m) vs blast-frag (< 10 m) thresholds.
+
+### Terminal Guidance & Seeker (2B)
+
+The terminal phase is driven by `TerminalGuidance` (`src/guidance/terminal_guidance.py`), which selects a backend via `GuidanceConfig.terminal_guidance_law`:
+
+- **`pn`** — classic proportional navigation, `a = N · Vc · LOṠ`.
+- **`apn`** — augmented PN, adds `(N/2)·a_target` (gravity-compensated target acceleration bias) to counter target maneuver/gravity.
+- **`zem`** — zero-effort-miss guidance; steers `ZEM = z + t_go·ż` (linear, constant-closing-speed) to null with a navigation-ratio gain, `t_go` from range / |Vc|.
+- **`sdre_mpc`** — SDRE-based MPC-lite: finite-horizon LQR on the linearized relative double-integrator kinematics, closed-form gain `K = [√2·√(q/r)·t_go·I, √(qv/r)·t_go·I]`.
+
+`SeekerModel` (`src/guidance/seeker.py`) models an active/semi-active radar or imaging-IR seeker: noisy LOS (az/el) measurements with glint, Poisson-gated clutter, RCS scintillation, and one-frame latency; a cosine-cone FOV/gimbal mask; and a self-contained Unscented Kalman Filter (P-scaled Merwe sigma points) that tracks relative position/velocity and returns a smoothed LOS rate. When a seeker is attached, `runner.py` advances it each terminal step and feeds the UKF LOS rate into the selected backend via `commanded_accel_seeker(...)`; otherwise it falls back to the analytic PN law. `DiscriminationModel` provides calibrated RV-vs-decoy class-conditional Gaussian likelihoods over `[RCS_bias, IR_flux, Doppler_width, micro_motion_flag]` (micro-motion is Bernoulli), with `calibrate()` re-estimation from labelled data and a `log_likelihood_ratio` / `is_rv` decision.
 
 ### End-to-End Simulation
 - **Target families**: ballistic, FOBS (2-body patched conic), HGV (skip-glide), suppressed (deep dip + evasion), swarm (clustered RVs).
@@ -69,6 +82,7 @@ src/
 │   ├── boost_guidance.py
 │   ├── midcourse_guidance.py
 │   ├── terminal_guidance.py
+│   ├── seeker.py
 │   └── law.py
 ├── surrogates/
 │   ├── train_gpr.py
@@ -105,6 +119,8 @@ tests/
 ├── test_optimization.py
 ├── test_sim.py
 ├── test_dymos.py
+├── test_seeker.py
+├── test_guidance_backends.py
 notebooks/
 ├── engagement_sweep.ipynb
 └── interactive_dashboard.ipynb
@@ -136,39 +152,49 @@ python -m pytest tests/ -v --ignore=tests/test_dymos.py
 ### Python API
 
 ```python
-from src.interceptors.config import InterceptorConfig
 from src.guidance.law import GuidanceLaw
 from src.scenarios.presets import (
     interceptor_preset,
     target_preset,
     set_interceptor_geodetic,
     set_target_geodetic,
+    build_interceptor_config,
+    sample_interceptor_uq,
 )
 from src.scenarios.scenario import EngagementScenario
 from src.sim.api import run_engagement, run_sweep
 
-# Use built-in geodetic presets
-interceptor = InterceptorConfig(name="Arrow 3", mass=1000.0, kill_radius=0.5)
-guidance = GuidanceLaw()
-launch_site = interceptor_preset("vandenberg")       # 34.7°N, 120.6°W
-preset = target_preset("ballistic_target_moscow")     # 55.8°N, 37.6°E
+# Built-in interceptor presets return (InterceptorConfig, GuidanceConfig).
+# Each bundles a multi-stage thrust model and a calibrated terminal backend.
+cfg, guidance_cfg = build_interceptor_config("arrow3")   # APN, IR seeker
+guidance = GuidanceLaw(config=guidance_cfg)
+
+launch_site = interceptor_preset("vandenberg")           # 34.7°N, 120.6°W
+preset = target_preset("ballistic_target_moscow")         # 55.8°N, 37.6°E
 scenario = EngagementScenario(
     interceptor_launch_site=launch_site,
     **preset.engagement.__dict__,
 )
 
-result = run_engagement(interceptor, guidance, preset.target, scenario, n_trials=50)
+result = run_engagement(cfg, guidance, preset.target, scenario, n_trials=50)
 print(result.miss_distance, result.kill_assessment)
 result.plot_3d()
 result.plot_miss_distance_distribution()
 
-# Custom geodetic site
+# Select a different terminal backend at runtime.
+custom_guidance = GuidanceLaw.from_dict({"terminal_guidance_law": "sdre_mpc"})
+
+# UQ: draw a ±20% log-normal perturbation of mass/Isp/divert for a Monte Carlo.
+import numpy as np
+uq_cfg, uq_g = sample_interceptor_uq("gmd", rng=np.random.default_rng(0), frac=0.20)
+
+# Custom geodetic site / target
 custom_site = set_interceptor_geodetic(28.4, -80.6, 0.0)  # Cape Canaveral
 custom_target = set_target_geodetic(39.9, 116.4, 0.0)     # Beijing
 
 # Batch sweep
 sweep = run_sweep(
-    interceptors=[interceptor],
+    interceptors=[cfg],
     targets=[preset.target, custom_target.target, ...],
     scenarios=[scenario, ...],
     n_trials=30,
@@ -191,6 +217,13 @@ df = sweep.to_dataframe()
 - Russia: `ballistic_target_moscow`, `ballistic_target_novosibirsk`, `ballistic_target_vladivostok`, `ballistic_target_murmansk`, `ballistic_target_yakutsk`
 - China: `ballistic_target_beijing`, `ballistic_target_shanghai`, `ballistic_target_xian`, `ballistic_target_chengdu`, `ballistic_target_urumqi`
 
+**Interceptor vehicle presets (`build_interceptor_config(name)` → `(InterceptorConfig, GuidanceConfig)`):**
+- `arrow3` — Arrow-3 exoatmospheric hit-to-kill; 2-stage (booster + sustainer), IR seeker, APN terminal guidance.
+- `tamir` — Iron Dome Tamir endoatmospheric point-defense; single-stage, radar seeker, SDRE-MPC terminal guidance (blast-frag).
+- `gmd` — GMD GBII exoatmospheric EKV hit-to-kill; 3-stage, IR seeker, ZEM terminal guidance.
+
+Each preset uses OSINT-approximate parameters (illustrative research defaults, not controlled data). `sample_interceptor_uq(name, rng, frac=0.20)` returns a ±20% log-normal-perturbed copy (mass, stage Isp, divert impulse) for Monte Carlo / sensitivity analysis. The returned `GuidanceConfig` selects one of the four terminal backends via `terminal_guidance_law`.
+
 ## Limitations & Remaining Steps
 
 ### Known limitations
@@ -199,9 +232,9 @@ df = sweep.to_dataframe()
 - **Guidance coupling is staged by time**, not by true event detection. `runner.py` switches boost→midcourse→terminal at fixed `t` thresholds (60 s / 180 s) rather than detecting thrust cutoff / dry mass / altitude as the plan specifies.
 - **MKV / stage-separation events are modeled but not injected into the runner integration loop.** `StageSeparation` and `MKVSystem` exist and are unit-capable, but the RK45 runner does not yet check `eom.separations`/`eom.mkv` at each step to apply impulses and mass drops.
 - **J3/J4 are not independently active.** They appear only inside the J2 gravity factor term; they are not applied as separate spherical-harmonic perturbations.
-- **Thrust model** is single-stage with a scalar `thrust_profile`; ullage motors and true multi-stage mass sequencing are out of scope (per plan §5).
+- **Thrust model** — interceptor presets now use true multi-stage `StageSpec` sequencing (Arrow-3 2-stage, GMD 3-stage); the legacy `EOM6DOF.thrust_profile` scalar path remains for ad-hoc configs.
 - **Atmosphere thermosphere** uses a fixed solar-activity factor (500 K exobase); no real F10.7/ap indexing.
-- **Decoy/target discrimination** uses a likelihood-ratio stub over a 4-feature vector, not calibrated sensor models.
+- **Decoy/target discrimination** — `DiscriminationModel` (RV-vs-decoy Gaussian class-conditionals over RCS bias / IR flux / Doppler width / micro-motion) is now calibrated-capable via `calibrate()`; OSINT-approximate priors are illustrative, not flight-rated.
 
 ### Remaining steps (post physics-fidelity plan)
 1. **Wire Dymos problem assembly** to the current OpenMDAO API (`num_nodes` → phase transcription) and integrate `EngagementRunner` as the terminal-phase ODE so the optimizer can minimize miss distance.
@@ -210,7 +243,7 @@ df = sweep.to_dataframe()
 4. **Calibrate aero** against a real database or FEniCS-generated training data; add analytic GPR Jacobian derivatives (complex-step already used for OpenMDAO partials).
 5. **Independent J3/J4** spherical-harmonic terms, and solar-activity-driven thermosphere.
 6. **WGS84 altitude** in the EOM already uses Bowring's method; extend gravity-gradient torque and inertial→geodetic routines for full WGS84 geopotential.
-7. **Calibrated discrimination** features (RCS bias, IR flux, Doppler width, micro-motion) from sensor models.
+7. **Threat library** — expand `DiscriminationModel` priors per real threat signatures (2C.2); add decoy/`decoy_model.py` bodies to target families and exercise the threat discrimination loop end-to-end.
 
 ## Safety & Defense Context
 

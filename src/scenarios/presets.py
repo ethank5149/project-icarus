@@ -14,6 +14,8 @@ from .target_factory import (
     R_EARTH,
 )
 from .scenario import EngagementScenario
+from ..interceptors.config import InterceptorConfig, GuidanceConfig
+from ..dynamics.thrust import StageSpec
 
 
 # ---------------------------------------------------------------------------
@@ -846,3 +848,160 @@ def build_threat_to_defended(
         engagement_end=engagement_end,
         **kwargs,
     )
+
+
+# ---------------------------------------------------------------------------
+# Interceptor vehicle presets (2B.4) — Arrow-3 / Tamir / GMD with UQ
+# ---------------------------------------------------------------------------
+# OSINT-approximate parameters (illustrative research defaults, NOT controlled
+# data). Each preset builds a multi-stage InterceptorConfig with realistic
+# stage masses/Isp and a selectable terminal guidance backend. sample_uq()
+# draws parameter perturbations (±20% mass/Isp/divert) for Monte-Carlo.
+
+def _constant_thrust(value: float):
+    return lambda t: value
+
+
+def _build_arrow3() -> dict:
+    return dict(
+        name="Arrow-3 (exoatmospheric hit-to-kill)",
+        mass=1300.0,
+        area=0.20,
+        ref_length=0.7,
+        kill_radius=0.5,
+        kill_mechanism="hit_to_kill",
+        accel_limit=180.0,
+        seeker_snr=20.0,
+        inertia=np.diag([60.0, 120.0, 150.0]),
+        mkv_mass=15.0,
+        mkv_divert_impulse=85.0,
+        stages=[
+            StageSpec(thrust=_constant_thrust(420e3), burn_time=6.0,
+                      wet_mass=900.0, dry_mass=150.0, Isp=300.0, name="booster"),
+            StageSpec(thrust=_constant_thrust(120e3), burn_time=8.0,
+                      wet_mass=350.0, dry_mass=80.0, Isp=320.0, name="sustainer"),
+        ],
+        guidance=dict(
+            midcourse_n=5.0, midcourse_accel_limit=60.0, terminal_n=4.0,
+            terminal_accel_limit=180.0, terminal_guidance_law="apn",
+            seeker_mode="ir", seeker_fov_deg=60.0, ukf_enabled=True,
+        ),
+    )
+
+
+def _build_tamir() -> dict:
+    return dict(
+        name="Iron Dome Tamir (endoaortic point-defense)",
+        mass=90.0,
+        area=0.03,
+        ref_length=0.15,
+        kill_radius=0.5,
+        kill_mechanism="blast_frag",
+        accel_limit=300.0,
+        seeker_snr=18.0,
+        inertia=np.diag([2.0, 4.0, 5.0]),
+        mkv_mass=0.0,
+        mkv_divert_impulse=0.0,
+        stages=[
+            StageSpec(thrust=_constant_thrust(60e3), burn_time=2.0,
+                      wet_mass=60.0, dry_mass=15.0, Isp=250.0, name="booster"),
+        ],
+        guidance=dict(
+            midcourse_n=5.0, midcourse_accel_limit=40.0, terminal_n=4.0,
+            terminal_accel_limit=300.0, terminal_guidance_law="sdre_mpc",
+            seeker_mode="radar", seeker_fov_deg=50.0, ukf_enabled=True,
+            zem_horizon=3.0,
+        ),
+    )
+
+
+def _build_gmd() -> dict:
+    return dict(
+        name="GMD GBII (exoatmospheric EKV hit-to-kill)",
+        mass=64000.0,
+        area=1.5,
+        ref_length=1.3,
+        kill_radius=0.5,
+        kill_mechanism="hit_to_kill",
+        accel_limit=120.0,
+        seeker_snr=22.0,
+        inertia=np.diag([3000.0, 6000.0, 8000.0]),
+        mkv_mass=60.0,
+        mkv_divert_impulse=200.0,
+        stages=[
+            StageSpec(thrust=_constant_thrust(8.5e6), burn_time=60.0,
+                      wet_mass=30000.0, dry_mass=4000.0, Isp=270.0, name="stage1"),
+            StageSpec(thrust=_constant_thrust(4.0e6), burn_time=70.0,
+                      wet_mass=14000.0, dry_mass=2000.0, Isp=290.0, name="stage2"),
+            StageSpec(thrust=_constant_thrust(2.0e6), burn_time=80.0,
+                      wet_mass=8000.0, dry_mass=1500.0, Isp=300.0, name="stage3"),
+        ],
+        guidance=dict(
+            midcourse_n=5.0, midcourse_accel_limit=40.0, terminal_n=4.0,
+            terminal_accel_limit=120.0, terminal_guidance_law="zem",
+            seeker_mode="ir", seeker_fov_deg=65.0, ukf_enabled=True,
+        ),
+    )
+
+
+_INTERCEPTOR_BUILDERS: Dict[str, callable] = {
+    "arrow3": _build_arrow3,
+    "tamir": _build_tamir,
+    "gmd": _build_gmd,
+}
+
+
+def _spec_to_pair(spec: dict) -> Tuple[InterceptorConfig, GuidanceConfig]:
+    g = spec.pop("guidance")
+    guidance_cfg = GuidanceConfig(**g)
+    cfg = InterceptorConfig(**spec)
+    return cfg, guidance_cfg
+
+
+def build_interceptor_config(name: str) -> Tuple[InterceptorConfig, GuidanceConfig]:
+    """Build an interceptor preset by name.
+
+    Returns ``(InterceptorConfig, GuidanceConfig)``. Supported names:
+    ``arrow3``, ``tamir``, ``gmd``. Each bundles a multi-stage thrust model
+    and a calibrated GuidanceConfig selecting one of the 2B.2 terminal backends.
+    """
+    if name not in _INTERCEPTOR_BUILDERS:
+        raise KeyError(
+            f"Unknown interceptor preset: {name}. Available: {list(_INTERCEPTOR_BUILDERS.keys())}"
+        )
+    return _spec_to_pair(_INTERCEPTOR_BUILDERS[name]())
+
+
+def get_interceptor_config_presets() -> Dict[str, Tuple[InterceptorConfig, GuidanceConfig]]:
+    """Return a mapping of all interceptor presets (nominal params)."""
+    return {name: build_interceptor_config(name) for name in _INTERCEPTOR_BUILDERS}
+
+
+def interceptor_config_preset(name: str) -> Tuple[InterceptorConfig, GuidanceConfig]:
+    """Return a single interceptor preset by name."""
+    return build_interceptor_config(name)
+
+
+def sample_interceptor_uq(name: str, rng: Optional[np.random.Generator] = None,
+                          frac: float = 0.20) -> Tuple[InterceptorConfig, GuidanceConfig]:
+    """Draw a UQ-perturbed copy of an interceptor preset (2B.4).
+
+    Mass, stage Isp, and divert impulse are perturbed by up to ``frac`` (±20%
+    default) log-normal draws. Returns ``(InterceptorConfig, GuidanceConfig)``;
+    the caller's RNG is threaded for reproducibility.
+    """
+    rng = rng or np.random.default_rng()
+    cfg, guidance_cfg = build_interceptor_config(name)
+    perturb = lambda base: float(base * np.exp(rng.uniform(-frac, frac)))
+    cfg.mass = perturb(cfg.mass)
+    cfg.mkv_divert_impulse = perturb(cfg.mkv_divert_impulse)
+    new_stages = []
+    for s in cfg.stages:
+        new_stages.append(StageSpec(
+            thrust=s.thrust, burn_time=s.burn_time,
+            wet_mass=perturb(s.wet_mass), dry_mass=perturb(s.dry_mass),
+            Isp=perturb(s.Isp), gimbal_limits=s.gimbal_limits,
+            gimbal_rate=s.gimbal_rate, name=s.name,
+        ))
+    cfg.stages = new_stages
+    return cfg, guidance_cfg

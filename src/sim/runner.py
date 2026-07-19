@@ -283,7 +283,17 @@ def _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom, thrust_fn,
             guidance_law.midcourse.update_target(target_state, t)
             accel_cmd = guidance_law.midcourse.commanded_accel(t, eom_state)
         else:
-            accel_cmd = guidance_law.terminal.commanded_accel(t, eom_state, target_state)
+            # Terminal guidance. If a seeker is attached (2B.1/2B.2) the UKF
+            # tracks the target and supplies a smoothed LOS rate to the
+            # selected terminal backend; otherwise use the analytic PN law.
+            seeker = getattr(guidance_law, "seeker", None)
+            if seeker is not None:
+                los_rate = seeker.update_tracker(eom_state, {"r": target_r, "v": target_v})
+                accel_cmd = guidance_law.terminal.commanded_accel_seeker(
+                    eom_state, {"r": target_r, "v": target_v}, los_rate=los_rate
+                )
+            else:
+                accel_cmd = guidance_law.terminal.commanded_accel(t, eom_state, target_state)
         # Convert the acceleration command to a force, capped by available thrust.
         desired_force = accel_cmd * m
         f_mag = np.linalg.norm(desired_force)

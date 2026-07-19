@@ -34,6 +34,11 @@ class GuidanceLaw:
             kill_radius=self.config.terminal_kill_radius,
             mechanism=self.config.terminal_mechanism,
             noise_std=0.01,
+            law=self.config.terminal_guidance_law,
+            zem_horizon=self.config.zem_horizon,
+            sdre_q_pos=self.config.sdre_q_pos,
+            sdre_q_vel=self.config.sdre_q_vel,
+            sdre_r_accel=self.config.sdre_r_accel,
         )
         if self.config.ukf_enabled:
             seeker_cfg = SeekerConfig(
