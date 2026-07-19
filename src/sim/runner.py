@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 import numpy as np
+from scipy.integrate import RK45
 
 from ..dynamics.eom_6dof import EOM6DOF
 from ..guidance.boost_guidance import BoostGuidance
@@ -12,6 +13,7 @@ from ..interceptors.config import InterceptorConfig
 from ..guidance.law import GuidanceLaw
 from ..scenarios.target_factory import TargetScenario
 from ..scenarios.scenario import EngagementScenario
+from ..aero.aero_analytical import blended_aero
 
 
 @dataclass
@@ -105,25 +107,31 @@ class EngagementResult:
         return ax
 
 
+def _compute_v0(scenario: EngagementScenario, magnitude: float = 1500.0) -> np.ndarray:
+    """Initial interceptor speed from launch site toward threat axis."""
+    site = np.asarray(scenario.interceptor_launch_site, dtype=float)
+    axis = np.asarray(scenario.threat_axis, dtype=float)
+    axis = axis / max(np.linalg.norm(axis), 1e-12)
+    return magnitude * axis
+
+
 def _surrogate(mach, alpha, beta, alt):
-    cd = 0.05 + 0.1 * mach**2
-    cl = 0.5 * np.radians(alpha)
-    cm = 0.0
-    return cd, cl, cm
+    return blended_aero(mach, alpha, beta, alt)[:3]
 
 
-def _closed_loop_ode(t, state, interceptor, guidance_law, target_fn):
-    r = state[:3]
-    v = state[3:6]
-    q = state[6:10]
-    omega = state[10:13]
-    m = state[13]
+def _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom):
+    r = y[:3]
+    v = y[3:6]
+    q = y[6:10]
+    omega = y[10:13]
+    m = y[13]
     q = q / max(np.linalg.norm(q), 1e-12)
 
     target_state = target_fn(t)
     target_r = target_state[:3]
     target_v = target_state[3:6]
 
+    alt = np.linalg.norm(r) - 6371e3
     if t < 60.0:
         phase = "boost"
     elif t < 180.0:
@@ -131,28 +139,20 @@ def _closed_loop_ode(t, state, interceptor, guidance_law, target_fn):
     else:
         phase = "terminal"
 
-    eom = EOM6DOF(
-        mass=m,
-        inertia=interceptor.inertia,
-        area=interceptor.area,
-        ref_length=interceptor.ref_length,
-    )
     eom_state = {"r": r, "v": v, "q": q, "omega": omega, "m": m}
 
+    f_thrust = np.zeros(3)
     if phase == "boost":
-        rho = 1.225 * np.exp(-np.linalg.norm(r) / 8500.0)
+        rho = 1.225 * np.exp(-max(alt, 0.0) / 8500.0)
         cmd = guidance_law.boost.commanded_gimbal(t, eom_state, rho, v)
         thrust_val = interceptor.thrust_profile(t) if interceptor.thrust_profile is not None else 0.0
-        f_thrust = np.array([thrust_val, 0.0, 0.0])
+        f_thrust = np.array([-thrust_val, 0.0, 0.0])
     elif phase == "midcourse":
-        accel_cmd = guidance_law.midcourse.commanded_accel(
-            t, eom_state, 0.0, np.linalg.norm(target_r - r)
-        )
+        guidance_law.midcourse.update_target(target_state, t)
+        accel_cmd = guidance_law.midcourse.commanded_accel(t, eom_state)
         f_thrust = accel_cmd * m
     else:
-        accel_cmd = guidance_law.terminal.commanded_accel(
-            t, eom_state, target_state, 0.0, np.linalg.norm(target_r - r)
-        )
+        accel_cmd = guidance_law.terminal.commanded_accel(t, eom_state, target_state)
         f_thrust = accel_cmd * m
 
     derivs = eom.compute(t, eom_state, _surrogate)
@@ -166,9 +166,12 @@ def _closed_loop_ode(t, state, interceptor, guidance_law, target_fn):
 
 
 def _integrate_trajectory(interceptor, guidance_law, target, scenario, perturb=None):
+    site = np.asarray(scenario.interceptor_launch_site, dtype=float)
+    v0 = _compute_v0(scenario, magnitude=1500.0)
+
     state0 = np.concatenate([
-        scenario.interceptor_launch_site,
-        np.array([0.0, 0.0, 1000.0]),
+        site,
+        v0,
         [1.0, 0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0],
         [interceptor.mass],
@@ -182,25 +185,27 @@ def _integrate_trajectory(interceptor, guidance_law, target, scenario, perturb=N
         if "mass_sigma" in perturb:
             state0[13] += np.random.normal(0, perturb["mass_sigma"])
 
+    eom = EOM6DOF(
+        mass=interceptor.mass,
+        inertia=interceptor.inertia,
+        area=interceptor.area,
+        ref_length=interceptor.ref_length,
+    )
+
     t_span = [scenario.engagement_start, scenario.engagement_end]
     target_fn = lambda t: target.propagate(t)
 
-    dt = 0.1
-    t = t_span[0]
-    state = state0.copy()
-    times = [t]
-    states = [state.copy()]
+    integrator = RK45(
+        lambda t, y: _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom),
+        t_span[0], state0, t_span[1], max_step=0.5, rtol=1e-6, atol=1e-9,
+    )
 
-    while t < t_span[1]:
-        step = min(dt, t_span[1] - t)
-        k1 = _closed_loop_ode(t, state, interceptor, guidance_law, target_fn)
-        k2 = _closed_loop_ode(t + step / 2, state + step / 2 * k1, interceptor, guidance_law, target_fn)
-        k3 = _closed_loop_ode(t + step / 2, state + step / 2 * k2, interceptor, guidance_law, target_fn)
-        k4 = _closed_loop_ode(t + step, state + step * k3, interceptor, guidance_law, target_fn)
-        state = state + step / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
-        t += step
-        times.append(t)
-        states.append(state.copy())
+    times = [integrator.t]
+    states = [integrator.y.copy()]
+    while integrator.status == "running":
+        integrator.step()
+        times.append(integrator.t)
+        states.append(integrator.y.copy())
 
     sol_t = np.array(times)
     sol_y = np.column_stack(states)

@@ -12,6 +12,8 @@ class TestConstraints:
             "terminal_v": np.zeros(3),
             "target_r": np.array([1.01, 0.0, 0.0]),
             "target_v": np.zeros(3),
+            "max_dyn_pressure_in": 0.0,
+            "max_alpha_in": 0.0,
         }
         outputs = {}
         comp.compute(inputs, outputs)

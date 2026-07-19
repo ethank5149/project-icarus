@@ -1,0 +1,709 @@
+locations:
+  # ==========================================
+  # STRATEGIC HOMELAND & DEFENDED TARGETS
+  # ==========================================
+  - name: Whiteman AFB
+    state: Missouri
+    country: United States
+    coordinates:
+      latitude: 38.7303
+      longitude: -93.5486
+      altitude: 871
+    designation: defended-target
+    tags:
+      - Subs/Planes
+      - Home of the B-2 Spirit Stealth Bomber fleet
+  - name: Washington D.C.
+    state: District of Columbia
+    country: United States
+    coordinates:
+      latitude: 38.8950
+      longitude: -77.0364
+      altitude: 40
+    designation: defended-target
+    tags:
+      - City
+      - National Capital Region (NCR) Command and Control Hub
+  - name: VLF Transmitter Lualualei
+    state: Hawaii
+    country: United States
+    coordinates:
+      latitude: 21.4204
+      longitude: -158.1539
+      altitude: 60
+    designation: defended-target
+    tags:
+      - Command/Control Target
+      - Strategic Very Low Frequency (VLF) submarine communications array
+  - name: VLF Transmitter Cutler
+    state: Maine
+    country: United States
+    coordinates:
+      latitude: 44.6445
+      longitude: -67.2846
+      altitude: 65
+    designation: defended-target
+    tags:
+      - Command/Control Target
+      - Primary East Coast Very Low Frequency (VLF) submarine communication station
+  - name: Strategic Command, Offutt AFB
+    state: Nebraska
+    country: United States
+    coordinates:
+      latitude: 41.1193
+      longitude: -95.9085
+      altitude: 1048
+    designation: defended-target
+    tags:
+      - Command/Control Target
+      - USSTRATCOM (U.S. Strategic Command) Headquarters
+  - name: Philadelphia
+    state: Pennsylvania
+    country: United States
+    coordinates:
+      latitude: 39.9526
+      longitude: -75.1652
+      altitude: 39
+    designation: defended-target
+    tags:
+      - City
+      - Major East Coast population and economic infrastructure hub
+  - name: Raven Rock Mountain Complex
+    state: Pennsylvania
+    country: United States
+    coordinates:
+      latitude: 39.7342
+      longitude: -77.4208
+      altitude: 1250
+    designation: defended-target
+    tags:
+      - Command/Control Target
+      - Alternate Joint Communications Center (AJCC) / Deep Underground Military Command Facility
+  - name: New York
+    state: New York
+    country: United States
+    coordinates:
+      latitude: 40.7128
+      longitude: -74.0060
+      altitude: 33
+    designation: defended-target
+    tags:
+      - City
+      - Primary economic, media, and population center
+  - name: The Pentagon
+    state: Virginia
+    country: United States
+    coordinates:
+      latitude: 38.8719
+      longitude: -77.0563
+      altitude: 30
+    designation: defended-target
+    tags:
+      - Command/Control Target
+      - Department of Defense Headquarters
+  - name: Naval Station Norfolk
+    state: Virginia
+    country: United States
+    coordinates:
+      latitude: 36.9373
+      longitude: -76.3218
+      altitude: 15
+    designation: defended-target
+    tags:
+      - Subs/Planes
+      - World's largest naval base; host concentration of Atlantic Fleet carrier strike groups
+  - name: Minot AFB
+    state: North Dakota
+    country: United States
+    coordinates:
+      latitude: 48.4157
+      longitude: -101.3580
+      altitude: 1667
+    designation: defended-target
+    tags:
+      - Minuteman III ICBM bases (highest priority)
+      - 91st Missile Wing (ICBMs) and 5th Bomb Wing (B-52H)
+  - name: Miami
+    state: Florida
+    country: United States
+    coordinates:
+      latitude: 25.7617
+      longitude: -80.1918
+      altitude: 6
+    designation: defended-target
+    tags:
+      - City
+      - Major maritime gateway and USSOUTHCOM regional headquarters hub
+  - name: Malmstrom AFB
+    state: Montana
+    country: United States
+    coordinates:
+      latitude: 47.5054
+      longitude: -111.1837
+      altitude: 3526
+    designation: defended-target
+    tags:
+      - Minuteman III ICBM bases (highest priority)
+      - 341st Missile Wing operational zone
+  - name: Los Angeles
+    state: California
+    country: United States
+    coordinates:
+      latitude: 34.0522
+      longitude: -118.2437
+      altitude: 305
+    designation: defended-target
+    tags:
+      - City
+      - Massive global economic, industrial, and deepwater port concentration
+  - name: San Diego
+    state: California
+    country: United States
+    coordinates:
+      latitude: 32.7157
+      longitude: -117.1611
+      altitude: 62
+    designation: defended-target
+    tags:
+      - City
+      - Major Pacific Fleet surface, aviation, and submarine homeport
+  - name: San Francisco
+    state: California
+    country: United States
+    coordinates:
+      latitude: 37.7749
+      longitude: -122.4194
+      altitude: 52
+    designation: defended-target
+    tags:
+      - City
+      - Critical regional logistics, technology, and economic nerve center
+  - name: Las Vegas
+    state: Nevada
+    country: United States
+    coordinates:
+      latitude: 36.1716
+      longitude: -115.1391
+      altitude: 2001
+    designation: defended-target
+    tags:
+      - City
+      - Proximity to Nellis AFB and Nevada National Security Site assets
+  - name: Kirtland AFB Albuquerque
+    state: New Mexico
+    country: United States
+    coordinates:
+      latitude: 35.0402
+      longitude: -106.6098
+      altitude: 5352
+    designation: defended-target
+    tags:
+      - Nuclear Storage Depot
+      - Air Force Materiel Command operations and large strategic warhead storage footprint
+  - name: Kings Bay Naval Base
+    state: Georgia
+    country: United States
+    coordinates:
+      latitude: 30.7938
+      longitude: -81.5283
+      altitude: 10
+    designation: defended-target
+    tags:
+      - Subs/Planes
+      - Primary East Coast homeport for Ohio-class ballistic missile submarines (SSBNs)
+  - name: Jim Creek Naval Radio Station
+    state: Washington
+    country: United States
+    coordinates:
+      latitude: 48.2036
+      longitude: -121.9168
+      altitude: 720
+    designation: defended-target
+    tags:
+      - Command/Control Target
+      - Critical Pacific Fleet Very Low Frequency (VLF) submarine transmitter
+  - name: Naval Base Kitsap
+    state: Washington
+    country: United States
+    coordinates:
+      latitude: 47.6974
+      longitude: -122.6842
+      altitude: 25
+    designation: defended-target
+    tags:
+      - Subs/Planes
+      - Strategic Pacific Fleet homeport for Ohio-class SSBNs at Bangor
+  - name: Hill AFB
+    state: Utah
+    country: United States
+    coordinates:
+      latitude: 41.1239
+      longitude: -111.9730
+      altitude: 4789
+    designation: defended-target
+    tags:
+      - Nuclear Storage Depot
+      - Air Force Materiel Command logistics; ICBM maintenance hub
+  - name: Salt Lake City
+    state: Utah
+    country: United States
+    coordinates:
+      latitude: 40.7608
+      longitude: -111.8910
+      altitude: 4226
+    designation: defended-target
+    tags:
+      - City
+      - Intermountain West regional hub and command transit node
+  - name: F.E. Warren AFB
+    state: Wyoming
+    country: United States
+    coordinates:
+      latitude: 41.1414
+      longitude: -104.8665
+      altitude: 6142
+    designation: defended-target
+    tags:
+      - Minuteman III ICBM bases (highest priority)
+      - 90th Missile Wing command center
+  - name: Denver
+    state: Colorado
+    country: United States
+    coordinates:
+      latitude: 39.7392
+      longitude: -104.9903
+      altitude: 5280
+    designation: defended-target
+    tags:
+      - City
+      - Major aerospace industry concentration and geographic command gateway
+  - name: NORAD, Peterson SFB
+    state: Colorado
+    country: United States
+    coordinates:
+      latitude: 38.8239
+      longitude: -104.6978
+      altitude: 6172
+    designation: defended-target
+    tags:
+      - Command/Control Target
+      - HQ NORAD and U.S. Northern Command (USNORTHCOM)
+  - name: Dallas-Fort Worth Metropolitan Area
+    state: Texas
+    country: United States
+    coordinates:
+      latitude: 32.7767
+      longitude: -96.7970
+      altitude: 430
+    designation: defended-target
+    tags:
+      - City
+      - Top regional aerospace manufacturing and massive civilian infrastructure node
+  - name: Houston
+    state: Texas
+    country: United States
+    coordinates:
+      latitude: 29.7604
+      longitude: -95.3698
+      altitude: 50
+    designation: defended-target
+    tags:
+      - City
+      - Major global energy/petrochemical concentration and NASA Johnson Space Center
+  - name: Pantex Plant
+    state: Texas
+    country: United States
+    coordinates:
+      latitude: 35.3134
+      longitude: -101.5583
+      altitude: 3550
+    designation: defended-target
+    tags:
+      - Nuclear Storage Depot
+      - Primary U.S. nuclear weapons assembly, disassembly, and stewardship facility
+  - name: Chicago
+    state: Illinois
+    country: United States
+    coordinates:
+      latitude: 41.8781
+      longitude: -87.6298
+      altitude: 594
+    designation: defended-target
+    tags:
+      - City
+      - Primary Midwestern population center and national transport/telecommunication intersection
+  - name: Barksdale AFB
+    state: Louisiana
+    country: United States
+    coordinates:
+      latitude: 32.5019
+      longitude: -93.6627
+      altitude: 166
+    designation: defended-target
+    tags:
+      - Subs/Planes
+      - HQ Air Force Global Strike Command and major B-52H nuclear bomber fleet base
+  - name: Schriever Space Force Base
+    state: Colorado
+    country: United States
+    coordinates:
+      latitude: 38.8033
+      longitude: -104.5253
+      altitude: 6266
+    designation: defended-target
+    tags:
+      - 100th Missile Defense Brigade Headquarters
+      - Missile Defense Element (MDE) crew operations
+      - Fire Control and C2BMC (Command, Control, Battle Management, and Communications) node
+  - name: Clear Space Force Station
+    state: Alaska
+    country: United States
+    coordinates:
+      latitude: 64.2908
+      longitude: -149.1878
+      altitude: 551
+    designation: defended-target
+    tags:
+      - Long Range Discrimination Radar (LRDR) site
+      - Solid-State Phased Array Radar system
+      - Tracks and discriminates complex ballistic threats for GMD
+  - name: Cape Canaveral Space Force Station
+    state: Florida
+    country: United States
+    coordinates:
+      latitude: 28.4889
+      longitude: -80.5778
+      altitude: 10
+    designation: defended-target
+    tags:
+      - Historical missile defense tracking and space-based sensor asset liftoffs
+      - Used for orbital tracking/SBIRS deployment support
+  # ==========================================
+  # FRIENDLY DEFENSIVE INTERCEPTOR BASES
+  # ==========================================
+  - name: Fort Greely
+    state: Alaska
+    country: United States
+    coordinates:
+      latitude: 63.9711
+      longitude: -145.7175
+      altitude: 1296
+    designation: interceptor-launch-site
+    tags:
+      - Ground-Based Midcourse Defense (GMD)
+      - Primary U.S. Homeland Shield
+      - 40 Operational Silos (plus 20 modern expansion fields built in 2025)
+      - Ground-Based Interceptors (GBI) / Next-Generation Interceptor (NGI) site
+  - name: Vandenberg Space Force Base
+    state: California
+    country: United States
+    coordinates:
+      latitude: 34.7420
+      longitude: -120.5724
+      altitude: 361
+    designation: interceptor-launch-site
+    tags:
+      - Ground-Based Midcourse Defense (GMD)
+      - 4 Operational Silos + Active Test Silo Infrastructure
+      - Ground-Based Interceptors (GBI) / Next-Generation Interceptor (NGI) site
+  - name: Pacific Missile Range Facility (PMRF) Barking Sands
+    state: Hawaii
+    country: United States
+    coordinates:
+      latitude: 22.0227
+      longitude: -159.7849
+      altitude: 10
+    designation: interceptor-launch-site
+    tags:
+      - Aegis Ashore Test Site
+      - Terminal High Altitude Area Defense (THAAD) testing
+      - Capable of operational hosting/launching of SM-3 and SM-6 families
+  - name: Andersen Air Force Base / Northwest Field
+    state: Guam
+    country: United States
+    coordinates:
+      latitude: 13.5812
+      longitude: 144.9287
+      altitude: 525
+    designation: interceptor-launch-site
+    tags:
+      - Task Force Talon / Permanent THAAD Battery Deployment
+      - Aegis Ashore (Guam defense system integration under 360-degree architecture)
+      - Focuses on regional IRBM/MRBM threat mitigation
+  - name: Ronald Reagan Ballistic Missile Defense Test Site (Kwajalein Atoll)
+    state: Marshall Islands
+    country: United States
+    coordinates:
+      latitude: 9.3952
+      longitude: 167.4716
+      altitude: 7
+    designation: interceptor-launch-site
+    tags:
+      - Meck Island launch facilities for GMD target/interceptor developmental testing
+      - High-fidelity instrumentation and radar tracking ranges
+      - Primarily acts as a developmental test facility rather than a mainland defense base
+  - name: Aegis Ashore Missile Defense System (AAMDS) Romania
+    state: Deveselu
+    country: Romania
+    coordinates:
+      latitude: 44.0701
+      longitude: 24.4173
+      altitude: 312
+    designation: interceptor-launch-site
+    tags:
+      - NATO European Phased Adaptive Approach (EPAA) Phase II
+      - Armed with land-based SM-3 Block IB interceptors
+      - Focuses on short, medium, and intermediate-range threats
+  - name: Aegis Ashore Missile Defense System (AAMDS) Poland
+    state: Redzikowo
+    country: Poland
+    coordinates:
+      latitude: 54.4782
+      longitude: 17.1121
+      altitude: 230
+    designation: interceptor-launch-site
+    tags:
+      - NATO European Phased Adaptive Approach (EPAA) Phase III
+      - Armed with land-based SM-3 Block IIA interceptors
+      - Operationalized to counter broader theater ballistic threats
+  # ==========================================
+  # FOREIGN STRATEGIC LAUNCH COMPLEXES
+  # ==========================================
+  - name: Kozelsk
+    state: Kaluga
+    country: Russia
+    coordinates:
+      latitude: 54.02
+      longitude: 35.46
+      altitude: 490
+    designation: target-launch-site
+    tags:
+      - Hardened underground silos.
+      - Houses the RS-24 Yars (SS-27 Mod 2) equipped with MIRVs.
+  - name: Tatishchevo
+    state: Saratov
+    country: Russia
+    coordinates:
+      latitude: 51.41
+      longitude: 45.32
+      altitude: 790
+    designation: target-launch-site
+    tags:
+      - Massed silo fields.
+      - Deploys the UR-100N UTTH (SS-19 Mod 3/4) and Topol-M (SS-27 Mod 1) silos.
+  - name: Dombarovsky / Yasny
+    state: Orenburg
+    country: Russia
+    coordinates:
+      latitude: 50.48
+      longitude: 59.31
+      altitude: 869
+    designation: target-launch-site
+    tags:
+      - Heavy silos.
+      - Operates the heavy liquid-fueled R-36M2 Voevoda (SS-18 Satan), Avangard hypersonic glide vehicles, and transitioning to the RS-28 Sarmat (SS-30).
+  - name: Uzhur
+    state: Krasnoyarsk
+    country: Russia
+    coordinates:
+      latitude: 55.19
+      longitude: 89.49
+      altitude: 1250
+    designation: target-launch-site
+    tags:
+      - Heavy silos deep in Siberia.
+      - Primary operational base for heavy R-36M2 Voevoda (SS-18) and transitioning RS-28 Sarmat (SS-30) systems.
+  - name: Vypolzovo / Yedrovo
+    state: Tver
+    country: Russia
+    coordinates:
+      latitude: 57.52
+      longitude: 33.40
+      altitude: 33
+    designation: target-launch-site
+    tags:
+      - Road-mobile garrison.
+      - Operates mobile Topol (SS-25) systems and transitioning mobile RS-24 Yars units.
+  - name: Teykovo
+    state: Ivanovo
+    country: Russia
+    coordinates:
+      latitude: 56.51
+      longitude: 40.32
+      altitude: 426
+    designation: target-launch-site
+    tags:
+      - Road-mobile garrison near Moscow.
+      - Heavily equipped with mobile Topol-M (SS-27 Mod 1) and RS-24 Yars (SS-27 Mod 2) TELs.
+  - name: Yoshkar-Ola
+    state: Mari El
+    country: Russia
+    coordinates:
+      latitude: 56.38
+      longitude: 47.51
+      altitude: 348
+    designation: target-launch-site
+    tags:
+      - Road-mobile garrison.
+      - Deploys mobile RS-24 Yars regiments with concealed forest infrastructure.
+  - name: Nizhny Tagil
+    state: Sverdlovsk
+    country: Russia
+    coordinates:
+      latitude: 58.04
+      longitude: 60.33
+      altitude: 950
+    designation: target-launch-site
+    tags:
+      - Ural-region road-mobile base.
+      - Completely modernized with multi-warhead mobile RS-24 Yars systems.
+  - name: Novosibirsk
+    state: Novosibirsk
+    country: Russia
+    coordinates:
+      latitude: 55.20
+      longitude: 83.00
+      altitude: 525
+    designation: target-launch-site
+    tags:
+      - Major Siberian road-mobile garrison.
+      - Deploys multiple active regiments of mobile RS-24 Yars TELs.
+  - name: Barnaul
+    state: Altai Krai
+    country: Russia
+    coordinates:
+      latitude: 53.19
+      longitude: 83.57
+      altitude: 590
+    designation: target-launch-site
+    tags:
+      - Southern Siberian mobile hub.
+      - Handles extensive mobile RS-24 Yars patrol sectors.
+  - name: Irkutsk
+    state: Irkutsk
+    country: Russia
+    coordinates:
+      latitude: 52.19
+      longitude: 104.14
+      altitude: 1440
+    designation: target-launch-site
+    tags:
+      - Easternmost mobile garrison near Lake Baikal.
+      - Operates mobile RS-24 Yars networks.
+  - name: Plesetsk Cosmodrome
+    state: Arkhangelsk
+    country: Russia
+    coordinates:
+      latitude: 62.54
+      longitude: 40.41
+      altitude: 330
+    designation: target-launch-site
+    tags:
+      - Primary high-latitude military launch complex.
+      - Features active research silos and mobile pads for testing next-generation ICBM variants (Sarmat, Yars, Topol-M).
+  - name: Yumen Silo Field
+    state: Gansu
+    country: China
+    coordinates:
+      latitude: 40.187
+      longitude: 96.524
+      altitude: 3609
+    designation: target-launch-site
+    tags:
+      - Solid-fuel DF-31A/AG & DF-41 (11,000-14,000+ km).
+      - Capable of multiple warheads (MIRVs).
+  - name: Hami Silo Field
+    state: Xinjiang
+    country: China
+    coordinates:
+      latitude: 42.342
+      longitude: 92.799
+      altitude: 2461
+    designation: target-launch-site
+    tags:
+      - Solid-fuel DF-31A/AG & DF-41.
+      - Contains massive new defensive launch pad overlays.
+  - name: Ordos Silo Field
+    state: Inner Mongolia
+    country: China
+    coordinates:
+      latitude: 40.170
+      longitude: 108.093
+      altitude: 4265
+    designation: target-launch-site
+    tags:
+      - Solid-fuel DF-31A/AG & DF-41.
+      - Organized in a highly structured, hardened survival grid layout.
+  - name: Luoning Complex
+    state: Henan
+    country: China
+    coordinates:
+      latitude: 34.285
+      longitude: 111.626
+      altitude: 1476
+    designation: target-launch-site
+    tags:
+      - Heavy liquid-fuel DF-5B/C (13,000+ km).
+      - Equipped with heavy payload capability for 5-10 MIRVs.
+  - name: Sundian Area
+    state: Henan
+    country: China
+    coordinates:
+      latitude: 33.251
+      longitude: 114.750
+      altitude: 164
+    designation: target-launch-site
+    tags:
+      - Liquid-fuel DF-5 series and older strategic variants.
+      - Localized deep silo launch pits.
+  - name: Tongdao Site
+    state: Hunan
+    country: China
+    coordinates:
+      latitude: 26.150
+      longitude: 109.766
+      altitude: 1050
+    designation: target-launch-site
+    tags:
+      - Liquid-fuel DF-5A/B variants nested inside southern mountain tunnel protection networks.
+  - name: Tonghua Garrison
+    state: Jilin
+    country: China
+    coordinates:
+      latitude: 41.668
+      longitude: 125.954
+      altitude: 1312
+    designation: target-launch-site
+    tags:
+      - Road-mobile DF-31A / DF-31AG; launch-on-dispersal capability utilizing local road and highway networks.
+  - name: Xiangyang Garrison
+    state: Hubei
+    country: China
+    coordinates:
+      latitude: 32.010
+      longitude: 112.120
+      altitude: 230
+    designation: target-launch-site
+    tags:
+      - Road-mobile DF-31AG launchers utilizing centralized transport infrastructure for rapid relocation.
+  - name: Jilantai Training Area
+    state: Inner Mongolia
+    country: China
+    coordinates:
+      latitude: 39.780
+      longitude: 105.850
+      altitude: 3346
+    designation: target-launch-site
+    tags:
+      - All strategic ICBM classes.
+      - Features drive-through training tunnels, simulated launch pads, and silo prototypes.
+  - name: Longpo Naval Base
+    state: Hainan Island
+    country: China
+    coordinates:
+      latitude: 18.215
+      longitude: 109.650
+      altitude: 0
+    designation: target-launch-site
+    tags:
+      - Strategic homeport for Type 094 SSBNs carrying JL-2 and JL-3 SLBMs (7,000-10,000+ km range).

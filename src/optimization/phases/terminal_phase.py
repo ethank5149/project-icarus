@@ -1,12 +1,14 @@
 import numpy as np
 import openmdao.api as om
-from ..dynamics.eom_6dof import EOM6DOF
-from ..guidance.terminal_guidance import TerminalGuidance
+from ...dynamics.eom_6dof import EOM6DOF
+from ...guidance.terminal_guidance import TerminalGuidance
+from ...aero.aero_analytical import blended_aero
 
 
 class TerminalODE(om.ExplicitComponent):
     def initialize(self):
         self.options.declare("boundary_alt", default=100e3)
+        self.options.declare("surrogate_path", default="aero_surrogate.pkl")
         self.options.declare("kill_mechanism", default="hit_to_kill")
         self.options.declare("kill_radius", default=0.5)
 
@@ -19,6 +21,8 @@ class TerminalODE(om.ExplicitComponent):
         self.add_input("accel_x", val=0.0)
         self.add_input("accel_y", val=0.0)
         self.add_input("accel_z", val=0.0)
+        self.add_input("target_r", val=np.zeros(3))
+        self.add_input("target_v", val=np.zeros(3))
         self.add_input("time", val=0.0)
 
         self.add_output("dr_dt", val=np.zeros(3))
@@ -41,11 +45,15 @@ class TerminalODE(om.ExplicitComponent):
         m = inputs["m"]
         t = inputs["time"]
         accel = np.array([inputs["accel_x"], inputs["accel_y"], inputs["accel_z"]])
+        target_r = inputs["target_r"]
 
         state = {"r": r, "v": v, "q": q, "omega": omega, "m": m}
 
         def surrogate(mach, alpha, beta, alt):
-            return 0.01 + 0.05 * mach**2, 0.3 * alpha, 0.0
+            cd, cy, cm, _, _ = blended_aero(
+                mach, alpha, beta, alt, boundary_alt=self.options["boundary_alt"]
+            )
+            return cd, cy, cm
 
         derivs = self.eom.compute(t, state, surrogate)
         outputs["dr_dt"] = derivs["r"]
@@ -54,4 +62,4 @@ class TerminalODE(om.ExplicitComponent):
         outputs["domega_dt"] = derivs["omega"]
         outputs["dm_dt"] = derivs["m"]
 
-        outputs["miss_distance"] = np.linalg.norm(r)
+        outputs["miss_distance"] = np.linalg.norm(r - target_r)

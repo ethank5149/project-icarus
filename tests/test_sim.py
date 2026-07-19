@@ -194,3 +194,25 @@ class TestEngagementRunner:
         assert isinstance(result.kill_assessment, bool)
         if result.monte_carlo:
             assert len(result.monte_carlo.miss_distances) == 5
+
+    def test_v0_computed_from_geometry(self):
+        from src.sim.runner import _compute_v0
+        scenario = EngagementScenario(
+            interceptor_launch_site=np.array([R_EARTH, 0.0, 0.0]),
+            threat_axis=np.array([1.0, 0.0, 0.0]),
+        )
+        v0 = _compute_v0(scenario, magnitude=1500.0)
+        assert np.isclose(np.linalg.norm(v0), 1500.0)
+        assert np.allclose(v0, [1500.0, 0.0, 0.0])
+
+    def test_monte_carlo_perturbation(self):
+        rng = np.random.default_rng(0)
+        interceptor = InterceptorConfig(name="Test", mass=1000.0)
+        guidance = GuidanceLaw()
+        target = BallisticScenario(r0=np.array([R_EARTH, 0.0, 0.0]), v0=np.array([0.0, 1000.0, 0.0]))
+        scenario = EngagementScenario(engagement_end=60.0)
+        runner = EngagementRunner(interceptor=interceptor, guidance=guidance, target=target, scenario=scenario)
+        result = runner.run(n_trials=3, perturbations={"position_sigma": 50.0, "velocity_sigma": 2.0})
+        assert result.monte_carlo is not None
+        assert len(result.monte_carlo.miss_distances) == 3
+        assert all(np.isfinite(m) for m in result.monte_carlo.miss_distances)

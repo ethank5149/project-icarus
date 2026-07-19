@@ -11,7 +11,7 @@ def load_data(filename="aero_data.h5"):
         X = np.column_stack(
             (hf["mach"][:], hf["alpha"][:], hf["beta"][:], hf["altitude"][:])
         )
-        y = np.column_stack((hf["Cd"][:], hf["Cl"][:], hf["Cm"][:]))
+        y = np.column_stack((hf["Cd"][:], hf["Cy"][:], hf["Cm"][:]))
         sigma = hf["sigma"][:]
     return X, y, sigma
 
@@ -27,7 +27,7 @@ class MultiOutputGPR:
             GaussianProcessRegressor(kernel=build_kernel(), n_restarts_optimizer=5),
             GaussianProcessRegressor(kernel=build_kernel(), n_restarts_optimizer=5),
         ]
-        self.target_names = ["Cd", "Cl", "Cm"]
+        self.target_names = ["Cd", "Cy", "Cm"]
 
     def fit(self, X, y):
         for i, model in enumerate(self.models):

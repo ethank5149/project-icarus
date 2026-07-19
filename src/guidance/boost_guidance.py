@@ -2,10 +2,15 @@ import numpy as np
 
 
 class BoostGuidance:
-    def __init__(self, pitch_over_q=15000.0, pitch_over_angle=np.radians(5.0), gimbal_limits=np.radians(15)):
+    def __init__(self, pitch_over_q=15000.0, pitch_over_angle=np.radians(5.0),
+                 gimbal_limits=(np.radians(15), np.radians(15)), mu=3.986004418e14,
+                 r0=6371e3, g0=9.80665):
         self.pitch_over_q = pitch_over_q
         self.pitch_over_angle = pitch_over_angle
-        self.gimbal_limits = gimbal_limits
+        self.gimbal_limits = np.asarray(gimbal_limits, dtype=float)
+        self.mu = mu
+        self.r0 = r0
+        self.g0 = g0
         self.pitched = False
 
     def commanded_gimbal(self, t, state, rho, v_inertial):
@@ -18,26 +23,16 @@ class BoostGuidance:
             angle = 0.0
         return np.clip([angle, 0.0], -self.gimbal_limits, self.gimbal_limits)
 
+    def gravity_turn_angle(self, v0_mag, r0=None):
+        """Pitch-over (flight-path) angle for a gravity-turn to desired apogee.
 
-class MidcourseGuidance:
-    def __init__(self, N=5.0, accel_limit=50.0, update_interval=2.0):
-        self.N = N
-        self.accel_limit = accel_limit
-        self.update_interval = update_interval
-        self.target_state = None
+        theta0 = arcsin[1 / (1 + v0^2 / (g0 * r0))] (flat-Earth energy estimate).
+        """
+        r0 = r0 if r0 is not None else self.r0
+        denom = 1.0 + v0_mag**2 / max(self.g0 * r0, 1e-6)
+        return np.arcsin(np.clip(1.0 / denom, -1.0, 1.0))
 
-    def update_target(self, target_state):
-        self.target_state = np.asarray(target_state, dtype=float)
-
-    def commanded_accel(self, t, interceptor_state, los_rate, range_):
-        if self.target_state is None:
-            return np.zeros(3)
-        r = interceptor_state["r"]
-        v = interceptor_state["v"]
-        los = self.target_state[:3] - r
-        los_unit = los / max(np.linalg.norm(los), 1e-6)
-        rel_vel = self.target_state[3:6] - v
-        closing = -np.dot(rel_vel, los_unit)
-        accel = self.N * closing * np.cross(rel_vel, los_unit)
-        accel = np.clip(accel, -self.accel_limit, self.accel_limit)
-        return accel
+    def pitch_rate(self, lift_accel, mass, gamma, speed):
+        """Gravity-turn flight-path rate: gamma_dot = (L/m) - g*cos(gamma)/V."""
+        g_local = self.mu / max(self.r0**2, 1e-6)
+        return (lift_accel / max(mass, 1e-6)) - g_local * np.cos(gamma) / max(speed, 1e-6)

@@ -9,27 +9,33 @@ Inspired by tiered missile defense architectures (Arrow 2/3, David's Sling, Iron
 ## Technical Architecture
 
 ### 6-DOF Dynamics
-- **Newton-Euler** equations in body frame.
-- **Unit quaternion** attitude representation with normalization.
-- **Regime toggle**: endo-atmospheric (drag + aero coefficients) vs exo-atmospheric (Newtonian, zero drag) with smooth taper at 100 km.
-- **Gravity**: inverse-square law with J2 extension point.
-- **Thrust/MKV**: mass flow, gimbal limits, stage separation impulses, MKV separation with 85 adj/sec divert thrusters.
+- **Newton-Euler** equations of motion with state `r` (inertial ECEF), `v` (inertial), `q` (body→inertial quaternion), `omega` (body), `m`.
+- **Quaternion attitude** with normalization and norm-preserving kinematics.
+- **Frame convention**: `v` is inertial; aerodynamic/gravity forces are evaluated in the body frame and rotated body→inertial (`R_b2i @ F_body`) before dividing by mass. Drag opposes velocity.
+- **Regime toggle**: endo-atmospheric (drag + aero coefficients) vs exo-atmospheric (Newtonian, zero drag) with a smooth cosine taper at 100 km.
+- **Gravity**: inverse-square law with a J2 toggle (active above ~50 km; J3/J4 included but currently contribute only through the J2 factor term).
+- **Atmosphere**: US Standard Atmosphere 1976 piecewise layers (0–100 km, barometric with per-layer lapse rate) and a realistic thermosphere above 100 km (temperature relaxes 200 K → 500 K, exponential density with ~50 km scale height, Sutherland viscosity).
+- **Thrust/MKV**: `Isp`-based mass flow (`mdot = -T / (Isp·g0)`), gimbaled thrust vector with first-order gimbal-rate limits, stage-separation impulses with optional spin, and MKV spring-ejection separation (relative velocity along bus x-axis) with 85 N gimbaled divert thrusters.
 
 ### Surrogate Modeling
-- **Multi-output GPR** (Cd, Cl, Cm) with composite kernels (`RBF + WhiteKernel`).
-- **Uncertainty propagation** through EOM to miss-distance statistics (Monte Carlo + Sobol sensitivity).
+- **Multi-output GPR** with composite kernels (`RBF + WhiteKernel`), outputs **Cd, Cy, Cm** (body-axis: drag, side force, pitch moment).
+- **Analytical post-processing**: `Cn` (yaw moment) and `Cl_roll` (roll moment) plus damping derivatives are computed analytically from Newtonian/linear-viscous models, not from the GPR.
+- **Coefficient convention** (standard missile/aircraft body axis, x-forward / y-right / z-down):
+  - `Cd` — drag (−x body), `Cy` — side force (+y body), `Cm` — pitch moment (about +y)
+  - `Cn` — yaw moment (about +z), `Cl_roll` — roll moment (about +x)
+- **Uncertainty propagation** through EOM to miss-distance statistics (Monte Carlo + elementary-effects sensitivity).
 - Regime-dependent data coverage validated against analytical baselines.
 
 ### Trajectory Optimization
 - **Dymos** with **Radau transcription** for discontinuous events (stage separation, MKV sep).
-- Explicit phases: **Boost**, **Midcourse**, **Terminal** with `link_phases` continuity.
-- Guidance laws: gravity turn (boost), PN with data-link (midcourse), APN/PN (terminal).
+- Explicit phases: **Boost**, **Midcourse**, **Terminal** with `link_phases` continuity. Each phase ODE uses the shared `EOM6DOF` and `blended_aero` surrogate (passing `boundary_alt` / `surrogate_path` through options).
+- Guidance laws: gravity turn / pitch-over (boost), **true proportional navigation (PN)** with data-link updates (midcourse), PN with seeker FOV check and likelihood-ratio discrimination (terminal).
 - Kill assessment: hit-to-kill (< 0.5 m) vs blast-frag (< 10 m) thresholds.
 
 ### End-to-End Simulation
 - **Target families**: ballistic, FOBS (2-body patched conic), HGV (skip-glide), suppressed (deep dip + evasion), swarm (clustered RVs).
 - **Separate-object architecture**: `InterceptorConfig`, `GuidanceLaw`, `TargetScenario`, `EngagementScenario`.
-- **Monte Carlo runner**: fixed-step RK4 closed-loop integration with guidance loop, perturbing initial conditions and parameters.
+- **Monte Carlo runner**: adaptive `scipy.integrate.RK45` closed-loop integration with guidance loop; initial `v0` computed from launch-site / threat-axis geometry. State perturbations applied to position, velocity, and mass.
 - **Batch sweep**: `run_sweep()` over interceptor × target × scenario grids with optional `joblib` parallelization.
 - **Result API**: `EngagementResult` with built-in 3D trajectory plotting, miss-distance histogram, and kill-probability analysis.
 - **Geodetic presets**: WGS84 coordinate conversion with realistic launch sites (USA interceptor bases, Russia/China target regions).
@@ -111,8 +117,8 @@ python src/aero/generate_aero_data.py
 # 2. Train surrogate model
 python src/surrogates/train_gpr.py
 
-# 3. Run tests
-python -m pytest tests/ -v
+# 3. Run tests (exclude the Dymos optimization suite; see Limitations)
+python -m pytest tests/ -v --ignore=tests/test_dymos.py
 ```
 
 ### Python API
@@ -172,6 +178,27 @@ df = sweep.to_dataframe()
 **Target regions (Russia / China):**
 - Russia: `ballistic_target_moscow`, `ballistic_target_novosibirsk`, `ballistic_target_vladivostok`, `ballistic_target_murmansk`, `ballistic_target_yakutsk`
 - China: `ballistic_target_beijing`, `ballistic_target_shanghai`, `ballistic_target_xian`, `ballistic_target_chengdu`, `ballistic_target_urumqi`
+
+## Limitations & Remaining Steps
+
+### Known limitations
+- **Dymos optimization suite is not runnable.** `tests/test_dymos.py` is excluded from CI. `src/optimization/trajectory_optimization.py` uses a Dymos API invocation (`num_nodes` option) that no longer matches the installed Dymos/OpenMDAO version, and the engagement `runner.py` is not yet wired in as a callable ODE for the optimizer. The per-phase ODE components (`boost_phase.py`, `midcourse_phase.py`, `terminal_phase.py`) import and run, but the top-level problem assembly fails.
+- **Aero surrogate is synthetic.** GPR is trained on analytical `blended_aero` data, not real wind-tunnel/CFD databases (DATCOM, CBA, FEniCS/DOLFINx). `Cn` and `Cl_roll` are analytic by design and bypass the GPR.
+- **Guidance coupling is staged by time**, not by true event detection. `runner.py` switches boost→midcourse→terminal at fixed `t` thresholds (60 s / 180 s) rather than detecting thrust cutoff / dry mass / altitude as the plan specifies.
+- **MKV / stage-separation events are modeled but not injected into the runner integration loop.** `StageSeparation` and `MKVSystem` exist and are unit-capable, but the RK45 runner does not yet check `eom.separations`/`eom.mkv` at each step to apply impulses and mass drops.
+- **J3/J4 are not independently active.** They appear only inside the J2 gravity factor term; they are not applied as separate spherical-harmonic perturbations.
+- **Thrust model** is single-stage with a scalar `thrust_profile`; ullage motors and true multi-stage mass sequencing are out of scope (per plan §5).
+- **Atmosphere thermosphere** uses a fixed solar-activity factor (500 K exobase); no real F10.7/ap indexing.
+- **Decoy/target discrimination** uses a likelihood-ratio stub over a 4-feature vector, not calibrated sensor models.
+
+### Remaining steps (post physics-fidelity plan)
+1. **Wire Dymos problem assembly** to the current OpenMDAO API (`num_nodes` → phase transcription) and integrate `EngagementRunner` as the terminal-phase ODE so the optimizer can minimize miss distance.
+2. **Event-driven phase transitions** in `runner.py`: detect boost→midcourse on `thrust < threshold` or `m < dry_mass`; midcourse→terminal on `altitude < 100 km` / `range < 50 km` / MKV separation.
+3. **Inject separation / MKV events** into the RK45 step loop (apply mass drops and velocity/attitude impulses at `t` crossings).
+4. **Calibrate aero** against a real database or FEniCS-generated training data; add analytic GPR Jacobian derivatives (complex-step already used for OpenMDAO partials).
+5. **Independent J3/J4** spherical-harmonic terms, and solar-activity-driven thermosphere.
+6. **WGS84 altitude** in the EOM already uses Bowring's method; extend gravity-gradient torque and inertial→geodetic routines for full WGS84 geopotential.
+7. **Calibrated discrimination** features (RCS bias, IR flux, Doppler width, micro-motion) from sensor models.
 
 ## Safety & Defense Context
 

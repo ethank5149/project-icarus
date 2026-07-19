@@ -80,6 +80,51 @@ def quat_kinematics(q, omega):
     return 0.5 * W @ q
 
 
+_WGS84_A = 6378137.0
+_WGS84_F = 1.0 / 298.257223563
+_WGS84_B = _WGS84_A * (1.0 - _WGS84_F)
+_WGS84_E2 = (_WGS84_A**2 - _WGS84_B**2) / _WGS84_A**2
+
+
+def geodetic_to_ecef(lat_deg, lon_deg, alt_m=0.0):
+    lat = np.radians(lat_deg)
+    lon = np.radians(lon_deg)
+    sin_lat = np.sin(lat)
+    cos_lat = np.cos(lat)
+    sin_lon = np.sin(lon)
+    cos_lon = np.cos(lon)
+    N = _WGS84_A / np.sqrt(1.0 - _WGS84_E2 * sin_lat**2)
+    x = (N + alt_m) * cos_lat * cos_lon
+    y = (N + alt_m) * cos_lat * sin_lon
+    z = (N * (1.0 - _WGS84_E2) + alt_m) * sin_lat
+    return np.array([x, y, z])
+
+
+def ecef_to_geodetic(r_ecef):
+    x, y, z = r_ecef
+    lon = np.degrees(np.arctan2(y, x))
+    p = np.sqrt(x**2 + y**2)
+    if p < 1e-6:
+        lat = 90.0 if z > 0 else -90.0
+        return float(lat), float(lon), float(abs(z) - _WGS84_B)
+    b = _WGS84_B
+    e_prime2 = _WGS84_E2 / (1.0 - _WGS84_E2)
+    theta = np.arctan2(z * _WGS84_A, p * b)
+    lat = np.arctan2(
+        z + e_prime2 * b * np.sin(theta)**3,
+        p - _WGS84_E2 * _WGS84_A * np.cos(theta)**3,
+    )
+    sin_lat = np.sin(lat)
+    N = _WGS84_A / np.sqrt(1.0 - _WGS84_E2 * sin_lat**2)
+    alt = p / np.cos(lat) - N
+    return float(np.degrees(lat)), float(lon), float(alt)
+
+
+def _geodetic_altitude(r):
+    _, _, alt = ecef_to_geodetic(r)
+    return alt
+
+
 def rotate_body_to_inertial(v_body, q):
     return quat_to_dcm(q) @ v_body
 

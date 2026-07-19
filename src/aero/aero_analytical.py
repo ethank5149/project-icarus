@@ -11,13 +11,14 @@ def newtonian_cd_exo(mach, alpha, beta):
     return cd
 
 
-def newtonian_cl_exo(mach, alpha, beta):
-    """Newtonian lift/side-force coefficient for exo-atmospheric regime."""
+def newtonian_sideforce_moments_exo(mach, alpha, beta):
+    """Newtonian side force and moments for exo-atmospheric regime."""
     alpha_rad = np.radians(alpha)
     beta_rad = np.radians(beta)
-    cl = 2.0 * np.sin(alpha_rad) * np.cos(alpha_rad)
-    cm = 2.0 * np.sin(beta_rad) * np.cos(beta_rad)
-    return cl, cm
+    cy = 2.0 * np.sin(alpha_rad) * np.cos(alpha_rad)
+    cn = 2.0 * np.sin(beta_rad) * np.cos(beta_rad)
+    cl_roll = 0.0
+    return cy, cn, cl_roll
 
 
 def linear_viscous_endo(mach, alpha, beta, ref_area=0.1, ref_length=1.0, rho=1.225, viscosity=1.78e-5):
@@ -26,22 +27,41 @@ def linear_viscous_endo(mach, alpha, beta, ref_area=0.1, ref_length=1.0, rho=1.2
     beta_rad = np.radians(beta)
 
     Re = rho * mach * ref_length / max(viscosity, 1e-10)
-    Cf = 0.455 / (np.log10(Re) ** 2.58)
+    Re = np.maximum(Re, 10.0)
+    logRe = np.log10(Re)
+    Cf = np.where(np.abs(logRe) > 1e-12, 0.455 / (logRe ** 2.58), 0.0)
 
-    Cd_par = Cf * (ref_area / ref_length**2)
+    S_wet = np.pi * ref_length * np.sqrt(ref_area / np.pi) * 2.0
+    Cd_friction = Cf * (S_wet / ref_area)
+
+    # Compressibility correction (vectorized over mach array).
+    mach = np.asarray(mach, dtype=float)
+    beta_pg = np.ones_like(mach)
+    sub = mach < 0.6
+    pg = (mach >= 0.6) & (mach < 0.7)
+    kt = mach >= 0.7
+    beta_pg = np.where(pg, np.sqrt(np.maximum(1.0 - mach**2, 1e-6)), beta_pg)
+    b_kt = (mach**2 + 2.0) / (mach**2 * np.sqrt(np.maximum(1.0 - 0.2 * mach**2, 1e-6)) + 2.0)
+    beta_pg = np.where(kt, b_kt, beta_pg)
+    beta_pg = np.where(sub, 1.0, beta_pg)
+    Cd_friction = Cd_friction / np.where(beta_pg > 1e-6, beta_pg, 1.0)
+
     Cd_induced = (np.deg2rad(alpha) ** 2 + np.deg2rad(beta) ** 2)
-    Cd = Cd_par + Cd_induced
+    Cd = Cd_friction + Cd_induced
     Cd = np.clip(Cd, 0.0, 2.0)
 
     Cl_lin = 2.0 * np.pi * alpha_rad
     Cl_visc = -0.1 * Cf * np.sign(alpha_rad)
-    Cl = Cl_lin + Cl_visc
+    cl_side = Cl_lin + Cl_visc
 
     Cm_lin = -1.2 * alpha_rad
     Cm_visc = 0.05 * Cf * np.sign(alpha_rad)
-    Cm = Cm_lin + Cm_visc
+    cm_pitch = Cm_lin + Cm_visc
 
-    return Cd, Cl, Cm
+    cn_yaw = 2.0 * np.pi * beta_rad
+    cl_roll = 0.0
+
+    return Cd, cl_side, cm_pitch, cn_yaw, cl_roll
 
 
 def blended_aero(mach, alpha, beta, altitude, boundary_alt=100e3, taper_width=5e3):
@@ -52,15 +72,20 @@ def blended_aero(mach, alpha, beta, altitude, boundary_alt=100e3, taper_width=5e
     blend = 0.5 * (1.0 - np.cos(np.pi * blend))
 
     cd_exo = newtonian_cd_exo(mach, alpha, beta)
-    cl_exo, cm_exo = newtonian_cl_exo(mach, alpha, beta)
+    cy_exo, cn_exo, cl_roll_exo = newtonian_sideforce_moments_exo(mach, alpha, beta)
 
-    Cd, Cl, Cm = linear_viscous_endo(mach, alpha, beta)
-    cd_exo_arr = np.full_like(Cd, cd_exo)
-    cl_exo_arr = np.full_like(Cl, cl_exo)
-    cm_exo_arr = np.full_like(Cm, cm_exo)
+    Cd_endo, cy_endo, cm_endo, cn_endo, cl_roll_endo = linear_viscous_endo(mach, alpha, beta)
 
-    Cd = Cd * (1.0 - blend) + cd_exo_arr * blend
-    Cl = Cl * (1.0 - blend) + cl_exo_arr * blend
-    Cm = Cm * (1.0 - blend) + cm_exo_arr * blend
+    cd_exo_arr = np.full_like(Cd_endo, cd_exo)
+    cy_exo_arr = np.full_like(cy_endo, cy_exo)
+    cm_exo_arr = np.full_like(cm_endo, 0.0)
+    cn_exo_arr = np.full_like(cn_endo, cn_exo)
+    cl_roll_exo_arr = np.full_like(cl_roll_endo, cl_roll_exo)
 
-    return Cd, Cl, Cm
+    Cd = Cd_endo * (1.0 - blend) + cd_exo_arr * blend
+    Cy = cy_endo * (1.0 - blend) + cy_exo_arr * blend
+    Cm = cm_endo * (1.0 - blend) + cm_exo_arr * blend
+    Cn = cn_endo * (1.0 - blend) + cn_exo_arr * blend
+    Cl_roll = cl_roll_endo * (1.0 - blend) + cl_roll_exo_arr * blend
+
+    return Cd, Cy, Cm, Cn, Cl_roll

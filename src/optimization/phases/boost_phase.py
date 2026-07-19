@@ -1,8 +1,8 @@
 import numpy as np
 import openmdao.api as om
-from ..dynamics.eom_6dof import EOM6DOF
-from ..guidance.boost_guidance import BoostGuidance
-from ..surrogates.aero_surrogate import AeroSurrogateComponent
+from ...dynamics.eom_6dof import EOM6DOF
+from ...guidance.boost_guidance import BoostGuidance
+from ...aero.aero_analytical import blended_aero
 
 
 class BoostODE(om.ExplicitComponent):
@@ -28,7 +28,7 @@ class BoostODE(om.ExplicitComponent):
         self.add_output("dm_dt", val=0.0)
 
         self.add_output("Cd", val=0.0)
-        self.add_output("Cl", val=0.0)
+        self.add_output("Cy", val=0.0)
         self.add_output("Cm", val=0.0)
 
         self.eom = EOM6DOF(boundary_alt=self.options["boundary_alt"])
@@ -49,7 +49,10 @@ class BoostODE(om.ExplicitComponent):
         rho = 1.225 * np.exp(-np.linalg.norm(r) / 8500.0)
 
         def surrogate(mach, alpha, beta, alt):
-            return 0.05 + 0.1 * mach**2, 0.5 * alpha, 0.0
+            cd, cy, cm, _, _ = blended_aero(
+                mach, alpha, beta, alt, boundary_alt=self.options["boundary_alt"]
+            )
+            return cd, cy, cm
 
         derivs = self.eom.compute(t, state, surrogate)
         outputs["dr_dt"] = derivs["r"]
@@ -62,7 +65,7 @@ class BoostODE(om.ExplicitComponent):
         mach = v_inertial / 300.0
         alpha = np.degrees(np.arctan2(v[2], v[0]))
         beta = np.degrees(np.arcsin(np.clip(v[1] / max(v_inertial, 1e-6), -1.0, 1.0)))
-        cd, cl, cm = surrogate(mach, alpha, beta, alt)
+        cd, cy, cm = surrogate(mach, alpha, beta, alt)
         outputs["Cd"] = cd
-        outputs["Cl"] = cl
+        outputs["Cy"] = cy
         outputs["Cm"] = cm

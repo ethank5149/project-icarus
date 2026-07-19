@@ -1,12 +1,14 @@
 import numpy as np
 import openmdao.api as om
-from ..dynamics.eom_6dof import EOM6DOF
-from ..guidance.midcourse_guidance import MidcourseGuidance
+from ...dynamics.eom_6dof import EOM6DOF
+from ...guidance.midcourse_guidance import MidcourseGuidance
+from ...aero.aero_analytical import blended_aero
 
 
 class MidcourseODE(om.ExplicitComponent):
     def initialize(self):
         self.options.declare("boundary_alt", default=100e3)
+        self.options.declare("surrogate_path", default="aero_surrogate.pkl")
 
     def setup(self):
         self.add_input("r", val=np.zeros(3))
@@ -40,7 +42,10 @@ class MidcourseODE(om.ExplicitComponent):
         state = {"r": r, "v": v, "q": q, "omega": omega, "m": m}
 
         def surrogate(mach, alpha, beta, alt):
-            return 0.05 + 0.1 * mach**2, 0.5 * alpha, 0.0
+            cd, cy, cm, _, _ = blended_aero(
+                mach, alpha, beta, alt, boundary_alt=self.options["boundary_alt"]
+            )
+            return cd, cy, cm
 
         derivs = self.eom.compute(t, state, surrogate)
         outputs["dr_dt"] = derivs["r"]

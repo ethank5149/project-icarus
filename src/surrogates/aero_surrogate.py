@@ -6,7 +6,7 @@ from openmdao.api import ExplicitComponent
 class AeroSurrogateComponent(ExplicitComponent):
     """
     OpenMDAO wrapper for multi-output GPR aero surrogate.
-    Returns Cd, Cl, Cm + predictive standard deviations.
+    Returns Cd, Cy, Cm + predictive standard deviations.
     """
 
     def initialize(self):
@@ -22,13 +22,13 @@ class AeroSurrogateComponent(ExplicitComponent):
         self.add_input("altitude", val=0.0)
 
         self.add_output("Cd", val=0.0)
-        self.add_output("Cl", val=0.0)
+        self.add_output("Cy", val=0.0)
         self.add_output("Cm", val=0.0)
         self.add_output("sigma_Cd", val=0.0)
-        self.add_output("sigma_Cl", val=0.0)
+        self.add_output("sigma_Cy", val=0.0)
         self.add_output("sigma_Cm", val=0.0)
 
-        self.declare_partials("*", "*", method="fd")
+        self.declare_partials("*", "*", method="cs")
 
     def compute(self, inputs, outputs):
         X = np.array(
@@ -43,8 +43,8 @@ class AeroSurrogateComponent(ExplicitComponent):
         )
         means, stds = self.gpr.predict(X, return_std=True)
         outputs["Cd"] = means[0, 0]
-        outputs["Cl"] = means[0, 1]
+        outputs["Cy"] = means[0, 1]
         outputs["Cm"] = means[0, 2]
         outputs["sigma_Cd"] = stds[0, 0]
-        outputs["sigma_Cl"] = stds[0, 1]
+        outputs["sigma_Cy"] = stds[0, 1]
         outputs["sigma_Cm"] = stds[0, 2]
