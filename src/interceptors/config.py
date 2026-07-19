@@ -74,3 +74,9 @@ class GuidanceConfig:
     terminal_accel_limit: float = 150.0
     terminal_kill_radius: float = 0.5
     terminal_mechanism: str = "hit_to_kill"
+    seeker_mode: str = "radar"  # "radar" | "semi_active_radar" | "ir"
+    seeker_fov_deg: float = 60.0
+    seeker_range_max: float = 50e3
+    seeker_snr_db: float = 20.0
+    seeker_noise_seed: int = 0
+    ukf_enabled: bool = True

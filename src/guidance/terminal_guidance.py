@@ -46,6 +46,39 @@ class TerminalGuidance:
         a_c = self.N * Vc * los_dot
         return np.clip(a_c, -self.accel_limit, self.accel_limit)
 
+    def commanded_accel_seeker(self, interceptor_state, target_state, los_rate=None,
+                                disable_fov=False):
+        """Terminal command using a UKF-smoothed LOS rate from the seeker.
+
+        `los_rate` is a 2-vector (az dot, el dot) as produced by
+        SeekerModel.update_tracker. If None, falls back to the analytic LOS rate.
+        """
+        if target_state is None:
+            return np.zeros(3)
+        r = np.asarray(interceptor_state["r"], dtype=float)
+        v = np.asarray(interceptor_state["v"], dtype=float)
+        tgt = np.asarray(target_state, dtype=float)
+        los = tgt[:3] - r
+        range_ = np.linalg.norm(los)
+        los_unit = los / max(range_, 1e-6)
+        if not disable_fov:
+            angle = np.arccos(np.clip(los_unit[0], -1.0, 1.0))
+            if angle > self.fov:
+                return np.zeros(3)
+        rel_vel = tgt[3:6] - v
+        if los_rate is not None:
+            los_rate = np.asarray(los_rate, dtype=float)
+            # Map (az_dot, el_dot) into inertial LOS-rate vector.
+            los_dot = los_rate[0] * np.array([-los_unit[1], los_unit[0], 0.0]) \
+                + los_rate[1] * np.array([-los_unit[0] * los_unit[2],
+                                          -los_unit[1] * los_unit[2],
+                                          1.0 - los_unit[2] ** 2])
+        else:
+            los_dot = (rel_vel - np.dot(rel_vel, los_unit) * los_unit) / max(range_, 1e-6)
+        Vc = -np.dot(rel_vel, los_unit)
+        a_c = self.N * Vc * los_dot
+        return np.clip(a_c, -self.accel_limit, self.accel_limit)
+
     def kill_assessment(self, miss_distance):
         if self.mechanism == "hit_to_kill":
             return miss_distance < self.kill_radius

@@ -1,11 +1,13 @@
 from dataclasses import dataclass
 from typing import Optional
+import math
 import numpy as np
 
 from ..interceptors.config import InterceptorConfig, GuidanceConfig
 from ..guidance.boost_guidance import BoostGuidance
 from ..guidance.midcourse_guidance import MidcourseGuidance
 from ..guidance.terminal_guidance import TerminalGuidance
+from ..guidance.seeker import SeekerModel, SeekerConfig
 
 
 @dataclass
@@ -33,6 +35,17 @@ class GuidanceLaw:
             mechanism=self.config.terminal_mechanism,
             noise_std=0.01,
         )
+        if self.config.ukf_enabled:
+            seeker_cfg = SeekerConfig(
+                mode=self.config.seeker_mode,
+                fov=math.radians(self.config.seeker_fov_deg),
+                range_max=self.config.seeker_range_max,
+                snr_db=self.config.seeker_snr_db,
+                noise_seed=self.config.seeker_noise_seed,
+            )
+            self.seeker = SeekerModel(seeker_cfg)
+        else:
+            self.seeker = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "GuidanceLaw":
