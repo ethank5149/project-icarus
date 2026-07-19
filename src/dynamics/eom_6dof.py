@@ -1,4 +1,6 @@
 import numpy as np
+from datetime import datetime
+
 from .coordinate_systems import (
     quat_normalize,
     quat_kinematics,
@@ -6,6 +8,7 @@ from .coordinate_systems import (
     rotate_body_to_inertial,
     rotate_inertial_to_body,
     _geodetic_altitude,
+    ecef_to_geodetic,
 )
 from .gravity import gravity_inertial, gravity_gradient_torque
 from .atmosphere import Atmosphere
@@ -31,6 +34,13 @@ class EOM6DOF:
         taper_width=5e3,
         atmosphere=None,
         use_j2=True,
+        use_high_order=True,
+        use_third_body=False,
+        use_tides=False,
+        solar_time=None,
+        f107a=150.0,
+        f107=150.0,
+        ap=4.0,
     ):
         self.mass = mass
         self.inertia = np.array(inertia, dtype=float)
@@ -41,6 +51,17 @@ class EOM6DOF:
         self.taper_width = taper_width
         self.atmosphere = atmosphere if atmosphere is not None else Atmosphere(boundary_alt, taper_width)
         self.use_j2 = use_j2
+        self.use_high_order = use_high_order
+        self.use_third_body = use_third_body
+        self.use_tides = use_tides
+        self.solar_time = solar_time if solar_time is not None else datetime(2000, 3, 21, 12, 0, 0)
+        self.f107a = f107a
+        self.f107 = f107
+        self.ap = ap
+        if atmosphere is not None and atmosphere.uses_nrlmsise:
+            atmosphere.set_exo_solar_geomagnetic(
+                f107a=self.f107a, f107=self.f107, ap=self.ap, time=self.solar_time
+            )
         self.mkv = None
         self.thrust_model = None
         self.separations = []
@@ -115,7 +136,18 @@ class EOM6DOF:
             f_thrust_body = np.asarray(thrust_vec, dtype=float)
             mass_dot = self.thrust_model.mass_rate(t, state)
 
-        g_inertial = gravity_inertial(r, use_j2=self.use_j2)
+        if self.atmosphere.uses_nrlmsise:
+            try:
+                lat, lon, _ = ecef_to_geodetic(r)
+                self.atmosphere.set_exo_solar_geomagnetic(
+                    lat=lat, lon=lon, time=self.solar_time
+                )
+            except Exception:
+                pass
+        g_inertial = gravity_inertial(
+            r, use_j2=self.use_j2, use_high_order=self.use_high_order,
+            use_third_body=self.use_third_body, use_tides=self.use_tides, t=t,
+        )
         f_gravity_body = rotate_inertial_to_body(g_inertial, q)
         # ``gravity_inertial`` returns an acceleration; aero/thrust are forces and
         # are divided by mass below. Apply gravity as an acceleration directly so

@@ -354,3 +354,108 @@ class TestGravity:
         g_newton = gravity_inertial(r, use_j2=False)
         g_j2 = gravity_inertial(r, use_j2=True)
         assert np.allclose(g_newton, g_j2, rtol=1e-5)
+
+
+class TestNRLMSISEAtmosphere:
+    def test_uses_nrlmsise(self):
+        from src.dynamics.atmosphere import _HAVE_NRLMSISE
+        if not _HAVE_NRLMSISE:
+            pytest.skip("nrlmsise00 not installed")
+        atm = Atmosphere()
+        assert atm.uses_nrlmsise
+        h = np.array([150e3, 300e3, 500e3])
+        rho = atm.density(h)
+        assert np.all(np.isfinite(rho))
+        # Density decreases with altitude in the thermosphere.
+        assert rho[0] > rho[1] > rho[2]
+
+    def test_high_solar_activity_increases_density(self):
+        from src.dynamics.atmosphere import _HAVE_NRLMSISE
+        if not _HAVE_NRLMSISE:
+            pytest.skip("nrlmsise00 not installed")
+        atm = Atmosphere()
+        atm.set_exo_solar_geomagnetic(f107a=70.0, f107=70.0, ap=4.0)
+        quiet = atm.density(np.array([300e3]))[0]
+        atm.set_exo_solar_geomagnetic(f107a=250.0, f107=250.0, ap=4.0)
+        active = atm.density(np.array([300e3]))[0]
+        assert active > quiet
+
+    def test_geomagnetic_storm_increases_density(self):
+        from src.dynamics.atmosphere import _HAVE_NRLMSISE
+        if not _HAVE_NRLMSISE:
+            pytest.skip("nrlmsise00 not installed")
+        atm = Atmosphere()
+        atm.set_exo_solar_geomagnetic(f107a=150.0, f107=150.0, ap=4.0)
+        quiet = atm.density(np.array([400e3]))[0]
+        atm.set_exo_solar_geomagnetic(f107a=150.0, f107=150.0, ap=80.0)
+        storm = atm.density(np.array([400e3]))[0]
+        assert storm > quiet
+
+    def test_temperature_finite(self):
+        from src.dynamics.atmosphere import _HAVE_NRLMSISE
+        if not _HAVE_NRLMSISE:
+            pytest.skip("nrlmsise00 not installed")
+        atm = Atmosphere()
+        T = atm.temperature(np.array([250e3]))
+        assert np.isfinite(T[0])
+        assert T[0] > 500.0
+
+
+class TestHigherOrderGravity:
+    def test_high_order_perturbation_small(self):
+        # Use a mid-latitude point so zonal harmonics P_n^0(z/r) are nonzero.
+        r = np.array([5000e3, 0.0, 5000e3])
+        g = gravity_inertial(r, use_high_order=True, use_third_body=False, use_tides=False)
+        g_base = gravity_inertial(r, use_high_order=False, use_third_body=False, use_tides=False)
+        # J5..J10 terms are tiny relative to the central + J2..J4 field.
+        rel = np.linalg.norm(g - g_base) / np.linalg.norm(g_base)
+        assert rel < 1e-3
+        # The perturbation is small but non-zero (well below 1e-6 relative,
+        # reflecting the genuine smallness of J5..J10).
+        assert np.linalg.norm(g - g_base) > 1e-9
+        assert not np.allclose(g, g_base, rtol=0.0, atol=1e-10)
+
+    def test_third_body_perturbation(self):
+        r = np.array([7000e3, 0.0, 0.0])
+        g0 = gravity_inertial(r, use_third_body=False)
+        g1 = gravity_inertial(r, use_third_body=True, t=86400.0)
+        d = np.linalg.norm(g1 - g0)
+        assert d > 1e-8
+        assert d < 1e-4  # third-body is a small perturbation
+
+    def test_solid_earth_tide_perturbation(self):
+        r = np.array([7000e3, 0.0, 0.0])
+        g0 = gravity_inertial(r, use_tides=False)
+        g1 = gravity_inertial(r, use_tides=True, t=86400.0)
+        d = np.linalg.norm(g1 - g0)
+        assert d > 1e-10
+        assert d < 1e-4
+
+    def test_legendre_zonal(self):
+        from src.dynamics.gravity import _legendre_zonal
+        assert np.isclose(_legendre_zonal(0, 0.3), 1.0)
+        assert np.isclose(_legendre_zonal(1, 0.3), 0.3)
+        assert np.isclose(_legendre_zonal(2, 0.0), -0.5)
+        assert np.isclose(_legendre_zonal(6, 0.0), -0.3125)
+
+
+class TestEOMGravityFidelity:
+    def test_high_order_flag_propagates(self):
+        import numpy as np
+        eom = EOM6DOF(mass=1000.0, inertia=np.diag([100.0, 200.0, 300.0]),
+                       area=0.1, ref_length=1.0,
+                       use_high_order=True, use_third_body=True, use_tides=True)
+        assert eom.use_high_order and eom.use_third_body and eom.use_tides
+
+    def test_eom_compute_runs_with_full_gravity(self):
+        import numpy as np
+        eom = EOM6DOF(mass=1000.0, inertia=np.diag([100.0, 200.0, 300.0]),
+                       area=0.1, ref_length=1.0,
+                       use_high_order=True, use_third_body=True, use_tides=True)
+        def surf(mach, alpha, beta, alt):
+            return 0.5, 0.0, 0.01
+        st = {"r": np.array([6.371e6, 0.0, 0.0]), "v": np.array([0.0, 7500.0, 0.0]),
+              "q": np.array([1.0, 0.0, 0.0, 0.0]), "omega": np.zeros(3), "m": 1000.0}
+        d = eom.compute(1000.0, st, surf)
+        assert np.all(np.isfinite(d["v"]))
+        assert np.linalg.norm(d["v"]) > 0.0

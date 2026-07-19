@@ -15,8 +15,8 @@ The terminal phase is supported by a selectable guidance backend (classic / augm
 - **Quaternion attitude** with normalization and norm-preserving kinematics.
 - **Frame convention**: `v` is inertial; aerodynamic/gravity forces are evaluated in the body frame and rotated body→inertial (`R_b2i @ F_body`) before dividing by mass. Drag opposes velocity.
 - **Regime toggle**: endo-atmospheric (drag + aero coefficients) vs exo-atmospheric (Newtonian, zero drag) with a smooth cosine taper at 100 km.
-- **Gravity**: inverse-square law with independent J2/J3/J4 zonal-harmonic terms (`gravity_inertial`, active above ~50 km; all zonal terms disabled together by `use_j2=False`). Higher-order EGM2008 and third-body tides are not yet modeled.
-- **Atmosphere**: US Standard Atmosphere 1976 piecewise layers (0–100 km, barometric with per-layer lapse rate) and a realistic thermosphere above 100 km (temperature relaxes 200 K → 500 K, exponential density with ~50 km scale height, Sutherland viscosity).
+- **Gravity**: inverse-square law with independent **J2–J10 zonal-harmonic terms** (`gravity_inertial`, EGM2008 low-order coefficients, active above ~50 km). `use_high_order` enables J5–J10; `use_third_body` adds Sun/Moon point-mass perturbations; `use_tides` adds degree-2 solid-Earth tidal acceleration. All zonal terms disable together via `use_j2=False`, and the higher-order/third-body/tide terms default on only where flagged.
+- **Atmosphere**: US Standard Atmosphere 1976 piecewise layers (0–100 km, barometric with per-layer lapse rate) below 100 km, blended with a **NRLMSISE-00** thermosphere/exosphere above 100 km (`nrlmsise00` package; analytic exponential thermosphere used as fallback if unavailable). NRLMSISE-00 is driven by the 81-day mean and previous-day F10.7 solar flux, the ap geomagnetic index, and date/time + geodetic latitude/longitude, giving physically realistic solar-activity- and storm-dependent density/temperature.
 - **Thrust/MKV**: `Isp`-based mass flow (`mdot = -T / (Isp·g0)`), gimbaled thrust vector with first-order gimbal-rate limits, stage-separation impulses with optional spin, and MKV spring-ejection separation (relative velocity along bus x-axis) with 85 N gimbaled divert thrusters.
 
 ### Surrogate Modeling
@@ -134,6 +134,7 @@ requirements.txt
 
 - Python 3.11 in `.conda-venv`
 - FEniCS/DOLFINx (optional; synthetic data used by default)
+- `nrlmsise00` (optional; NRLMSISE-00 thermosphere — falls back to analytic thermosphere if absent)
 - OpenMDAO, Dymos, scikit-learn, h5py, ipywidgets, pandas
 
 ## Usage
@@ -232,17 +233,16 @@ Each preset uses OSINT-approximate parameters (illustrative research defaults, n
 - **Aero surrogate default data is synthetic.** `train_gpr.py` trains on analytical `blended_aero` by default; in-repo CFD generation (`aero/geometry.py`, `aero/cfd_generators.py`, DOLFINx 0.9.0) is available but not yet auto-wired to the GPR. `Cn` and `Cl_roll` are analytic by design and bypass the GPR.
 - **Phase transitions** are event-driven (not time-based): `ThrustCutoffEvent` (thrust ≈ 0 or `m ≤ dry_mass`) ends boost; `ReentryEvent` (`alt < boundary`) / `RangeEvent` (`range < threshold`) enter terminal. A `t_max` safety cap still applies.
 - **MKV / stage-separation events** are injected into the RK45 step loop: `InterceptorConfig._separations` builds `StageSeparation` impulses from multi-stage timing, and `_integrate_trajectory` applies mass drops and Δv/spin at each crossing.
-- **Zonal gravity** — `gravity_inertial` applies independent J2/J3/J4 spherical-harmonic zonal terms (all disabled together by `use_j2=False`); higher-order EGM2008 terms and third-body/Sun-Moon tides are not yet modeled.
+- **Zonal gravity** — `gravity_inertial` applies independent J2–J10 EGM2008 spherical-harmonic zonal terms (`use_high_order` for J5–J10; `use_third_body` adds Sun/Moon point-mass terms; `use_tides` adds degree-2 solid-Earth tides). All zonal terms disable together via `use_j2=False`; higher-order/third-body/tide terms activate only when their flags are set.
 - **Thrust model** — interceptor presets now use true multi-stage `StageSpec` sequencing (Arrow-3 2-stage, GMD 3-stage); the legacy `EOM6DOF.thrust_profile` scalar path remains for ad-hoc configs.
-- **Atmosphere thermosphere** uses a fixed solar-activity factor (500 K exobase); no real F10.7/ap indexing.
+- **Atmosphere thermosphere** uses **NRLMSISE-00** (`nrlmsise00` package) driven by F10.7/a (81-day mean + previous-day) and ap, plus date/time and geodetic lat/lon; falls back to the analytic exponential thermosphere if the package is unavailable.
 - **Decoy/target discrimination** — `DiscriminationModel` is calibrated-capable via `calibrate()` and every `GuidanceLaw` ships a discriminator pre-trained on `ThreatSignatureLibrary.default()`; OSINT-approximate priors are illustrative, not flight-rated.
 
 ### Remaining steps (post physics-fidelity plan)
 1. **Wire Dymos problem assembly** to the current OpenMDAO API (`num_nodes` → phase transcription) and integrate `EngagementRunner` as the terminal-phase ODE so the optimizer can minimize miss distance.
 2. **Calibrate aero** against a real database or FEniCS-generated training data; add analytic GPR Jacobian derivatives (complex-step already used for OpenMDAO partials).
-3. **Higher-order gravity** — EGM2008 higher-order terms, third-body (Sun/Moon) and solid-Earth tides; solar-activity-driven thermosphere (NRLMSISE-00 / F10.7/ap).
-4. **WGS84 altitude** in the EOM already uses Bowring's method; extend gravity-gradient torque and inertial→geodetic routines for full WGS84 geopotential.
-5. **Threat library** — expand `ThreatSignatureLibrary` with more per-class samples (boosted/MBV RVs, advanced decoys) and fold real threat signatures into the `GuidanceLaw` discriminator; add maneuvering-RV aero to target families.
+3. **WGS84 altitude** in the EOM already uses Bowring's method; extend gravity-gradient torque and inertial→geodetic routines for full WGS84 geopotential.
+4. **Threat library** — expand `ThreatSignatureLibrary` with more per-class samples (boosted/MBV RVs, advanced decoys) and fold real threat signatures into the `GuidanceLaw` discriminator; add maneuvering-RV aero to target families.
 
 ## Safety & Defense Context
 

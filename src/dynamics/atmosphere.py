@@ -1,5 +1,12 @@
 import numpy as np
 
+try:  # NRLMSISE-00 is an optional dependency; fall back to the analytic thermosphere.
+    from nrlmsise00 import msise_model as _msise_model
+    _HAVE_NRLMSISE = True
+except Exception:  # pragma: no cover - environment dependent
+    _msise_model = None
+    _HAVE_NRLMSISE = False
+
 
 R_AIR = 287.05
 GAMMA = 1.4
@@ -7,6 +14,20 @@ G0 = 9.80665
 T0 = 288.15
 P0 = 101325.0
 RHO0 = 1.225
+
+# Species molar masses [g/mol] for converting NRLMSISE number densities [cm^-3]
+# to mass densities [kg/m^3].
+_AVOGADRO = 6.02214076e23
+_SPECIES_MOLAR = {
+    "He": 4.002602,
+    "O": 15.999,
+    "N2": 28.0134,
+    "O2": 31.9988,
+    "Ar": 39.948,
+    "H": 1.00794,
+    "N": 14.0067,
+    "AnO": 15.999,
+}
 
 _USSA76_LAYERS = [
     (0.0, 11e3, -0.0065, T0, P0),
@@ -141,12 +162,109 @@ class ExoAtmosphere:
         return 1.458e-6 * (T ** 1.5) / (T + 110.4)
 
 
+class NRLMSISEExo:
+    """NRLMSISE-00 thermosphere/exosphere model.
+
+    A physically-based empirical atmosphere driven by the 81-day mean and
+    previous-day F10.7 solar radio flux and the geomagnetic ap index, as well
+    as the date/time, latitude, longitude and altitude. Requires the optional
+    ``nrlmsise00`` package; if it is unavailable the analytic :class:`ExoAtmosphere`
+    is used instead.
+    """
+
+    def __init__(self, f107a=150.0, f107=150.0, ap=4.0,
+                 time=None, lat=0.0, lon=0.0):
+        self.f107a = f107a
+        self.f107 = f107
+        self.ap = ap
+        self.time = time
+        self.lat = lat
+        self.lon = lon
+
+    def _msise(self, h):
+        from datetime import datetime
+        time = self.time if self.time is not None else datetime(2000, 3, 21, 12, 0, 0)
+        alt_km = float(np.asarray(h, dtype=float))
+        d, t = _msise_model(
+            time, alt_km, self.lat, self.lon,
+            self.f107a, self.f107, self.ap, method="gtd7d",
+        )
+        # d[5] = total mass density [g/cm^3] (gtd7d includes anomalous O).
+        rho_g_cm3 = float(d[5])
+        rho = rho_g_cm3 * 1.0e3  # g/cm^3 -> kg/m^3
+        T = float(t[1])          # temperature at altitude [K]
+        Texo = float(t[0])       # exospheric temperature [K]
+        return rho, T, Texo
+
+    def density(self, h):
+        h = np.asarray(h, dtype=float)
+        out = np.empty_like(h, dtype=float)
+        for i in range(h.shape[0]):
+            out[i] = self._msise(h[i])[0]
+        return out
+
+    def temperature(self, h):
+        h = np.asarray(h, dtype=float)
+        out = np.empty_like(h, dtype=float)
+        for i in range(h.shape[0]):
+            out[i] = self._msise(h[i])[1]
+        return out
+
+    def exospheric_temperature(self, h):
+        h = np.asarray(h, dtype=float)
+        out = np.empty_like(h, dtype=float)
+        for i in range(h.shape[0]):
+            out[i] = self._msise(h[i])[2]
+        return out
+
+    def pressure(self, h):
+        rho = self.density(h)
+        T = self.temperature(h)
+        M_mean = 28.0e-3  # kg/mol, mean molar mass of the thermosphere
+        return rho / M_mean * R_UNIVERSAL * np.maximum(T, 50.0)
+
+    def speed_of_sound(self, h):
+        T = self.temperature(h)
+        return np.sqrt(GAMMA * R_AIR * np.maximum(T, 150.0))
+
+    def dynamic_viscosity(self, h):
+        T = self.temperature(h)
+        return 1.458e-6 * (T ** 1.5) / (T + 110.4)
+
+
+R_UNIVERSAL = 8.314462618
+
+
 class Atmosphere:
-    def __init__(self, boundary_alt=100e3, taper_width=5e3):
+    def __init__(self, boundary_alt=100e3, taper_width=5e3, exo_model=None):
         self.boundary_alt = boundary_alt
         self.taper_width = taper_width
-        self.exo = ExoAtmosphere()
         self.endo = EndoAtmosphere()
+        if exo_model is not None:
+            self.exo = exo_model
+        elif _HAVE_NRLMSISE:
+            self.exo = NRLMSISEExo()
+        else:
+            self.exo = ExoAtmosphere()
+        self.uses_nrlmsise = isinstance(self.exo, NRLMSISEExo)
+
+    def set_exo_solar_geomagnetic(self, f107a=None, f107=None, ap=None,
+                                  time=None, lat=None, lon=None):
+        """Update the exo-atmospheric drivers (solar flux, geomagnetism, geography)."""
+        if not isinstance(self.exo, NRLMSISEExo):
+            return
+        if f107a is not None:
+            self.exo.f107a = f107a
+        if f107 is not None:
+            self.exo.f107 = f107
+        if ap is not None:
+            self.exo.ap = ap
+        if time is not None:
+            self.exo.time = time
+        if lat is not None:
+            self.exo.lat = lat
+        if lon is not None:
+            self.exo.lon = lon
 
     def density(self, h):
         return self._regime_value(h, "density")
