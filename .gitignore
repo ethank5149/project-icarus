@@ -4,3 +4,11 @@
 */*/*/__pycache__
 .kilo/
 .pytest_cache/
+
+# Dymos / OpenMDAO run outputs (regenerated on each trajectory-optimization run)
+*_out/
+problem_out/
+coloring_files/
+reports/
+.openmdao_out
+*.db

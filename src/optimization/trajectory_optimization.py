@@ -54,7 +54,8 @@ def build_trajectory_problem(interceptor=None, guidance=None):
                       lower=-0.26, upper=0.26, fix_initial=True, fix_final=True, val=0.0)
     boost.add_control("gimbal_delta", units="rad", opt=True,
                       lower=-0.26, upper=0.26, fix_initial=True, fix_final=True, val=0.0)
-    boost.add_objective("time_phase", scaler=-1.0, loc="final")
+    # Boost has no standalone objective; the problem minimizes the
+    # terminal-phase miss distance (set below).
 
     # --- Midcourse phase ---------------------------------------------------
     midcourse = dm.Phase(ode_class=MidcourseODE, transcription=tx)
@@ -87,7 +88,7 @@ def build_trajectory_problem(interceptor=None, guidance=None):
     terminal.set_time_options(fix_initial=False, duration_bounds=(10.0, 60.0), units="s")
     terminal.add_state("r", rate_source="dr_dt", units="m", shape=(3,),
                        fix_initial=False, fix_final=True,
-                       val=np.array([100e3, 0.0, 6471e3]))
+                       val=np.array([300e3, 0.0, 6471e3]))
     terminal.add_state("v", rate_source="dv_dt", units="m/s", shape=(3,),
                        fix_initial=False, fix_final=False,
                        val=np.array([-500.0, 0.0, -500.0]))
@@ -115,13 +116,34 @@ def build_trajectory_problem(interceptor=None, guidance=None):
     traj.link_phases(phases=["midcourse", "terminal"],
                      vars=["r", "v", "q", "omega", "m", "time"])
 
+    # Terminal-phase objective: minimize time-to-intercept (t_duration) while
+    # driving the final interceptor position onto the defended aim point. The
+    # miss distance is reported as a timeseries for assessment; the hard
+    # kill-criterion is enforced by the final-position boundary constraint
+    # below, which is gradient-connected through the ``r`` state.
+    terminal.add_timeseries_output("miss_distance")
+    terminal.add_objective("time_phase", scaler=1.0, loc="final")
+    # Drive the interceptor onto the defended aim point at intercept; this is the
+    # planner's miss-distance kill-criterion expressed as a final-position
+    # equality constraint (gradient-connected through the terminal r-state).
+    terminal.add_boundary_constraint(
+        "r", loc="final", units="m", shape=(3,),
+        equals=np.array([100e3, 0.0, 6471e3]),
+    )
+
     p.driver = om.ScipyOptimizeDriver(optimizer="SLSQP")
     p.driver.declare_coloring()
+    p.driver.opt_settings["maxiter"] = 50
 
-    # Initial conditions are supplied via ``val=`` in each ``add_state`` /
-    # ``add_control`` call above, so Dymos can build its own (internally
-    # vectorized) initial guess without post-setup plumbing.
     p.setup()
+
+    # Provide feasible initial phase durations (midpoints of their bounds) so
+    # SLSQP starts inside the feasible region instead of stalling on an
+    # infeasible t_duration = 1.0 default.
+    p.set_val("traj.boost.t_duration", 50.0)
+    p.set_val("traj.midcourse.t_duration", 130.0)
+    p.set_val("traj.terminal.t_duration", 35.0)
+
     return p
 
 
