@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 
-from src.guidance.seeker import SeekerModel, SeekerConfig, _UKF, _merwe_sigmas
-from src.guidance.law import GuidanceLaw
-from src.guidance.terminal_guidance import TerminalGuidance
+from project_icarus.guidance.seeker import SeekerModel, SeekerConfig, _UKF, _merwe_sigmas
+from project_icarus.guidance.law import GuidanceLaw
+from project_icarus.guidance.terminal_guidance import TerminalGuidance
 
 
 def _true_los(x):

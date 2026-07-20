@@ -25,7 +25,8 @@ def run_engagement(
     scenario: EngagementScenario,
     n_trials: int = 50,
     perturbations: Optional[Dict[str, float]] = None,
-) -> EngagementResult:
+    audit: bool = False,
+) -> Any:
     """Run a single end-to-end engagement simulation.
 
     Parameters
@@ -42,11 +43,15 @@ def run_engagement(
         Number of Monte Carlo trials.
     perturbations : dict, optional
         Perturbation sigmas for Monte Carlo.
+    audit : bool, default False
+        When True, returns ``(EngagementResult, AuditReport)`` so every
+        component (interceptor, guidance, seeker, C2, integrator, kill
+        assessment) is auditable. When False (default), returns the
+        ``EngagementResult`` exactly as before.
 
     Returns
     -------
-    EngagementResult
-        Result with trajectories, miss distance, kill assessment, and Monte Carlo statistics.
+    EngagementResult | tuple[EngagementResult, AuditReport]
     """
     runner = EngagementRunner(
         interceptor=interceptor,
@@ -54,7 +59,18 @@ def run_engagement(
         target=target,
         scenario=scenario,
     )
-    return runner.run(n_trials=n_trials, perturbations=perturbations)
+    result = runner.run(n_trials=n_trials, perturbations=perturbations)
+    if audit:
+        from ..reporting import EngagementAuditor
+        report = EngagementAuditor().audit(
+            interceptor=interceptor,
+            guidance=guidance.config if hasattr(guidance, "config") else None,
+            target=target,
+            scenario=scenario,
+            result=result,
+        )
+        return result, report
+    return result
 
 
 def run_sweep(

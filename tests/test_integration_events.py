@@ -1,18 +1,18 @@
 import numpy as np
 import pytest
-from src.interceptors.config import InterceptorConfig
-from src.guidance.law import GuidanceLaw
-from src.scenarios.target_factory import BallisticScenario
-from src.scenarios.scenario import EngagementScenario
-from src.sim.runner import (
+from project_icarus.interceptors.config import InterceptorConfig
+from project_icarus.guidance.law import GuidanceLaw
+from project_icarus.scenarios.target_factory import BallisticScenario
+from project_icarus.scenarios.scenario import EngagementScenario
+from project_icarus.sim.runner import (
     EngagementRunner,
     ThrustCutoffEvent,
     ReentryEvent,
     RangeEvent,
     _current_phase,
 )
-from src.sim.config import SimConfig
-from src.dynamics.thrust import StageSpec, StageSeparation
+from project_icarus.sim.config import SimConfig
+from project_icarus.dynamics.thrust import StageSpec, StageSeparation
 
 
 R_EARTH = 6371e3

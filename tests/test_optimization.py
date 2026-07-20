@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from src.constraints import InterceptConstraint, QuatNormConstraint, ControlSaturation
+from project_icarus.constraints import InterceptConstraint, QuatNormConstraint, ControlSaturation
 
 
 class TestConstraints:

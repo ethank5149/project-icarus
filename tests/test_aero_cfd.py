@@ -4,7 +4,7 @@ import tempfile
 import numpy as np
 import pytest
 
-from src.aero.geometry import (
+from project_icarus.aero.geometry import (
     VEHICLE_PRESETS,
     get_vehicle,
     build_surface_mesh,
@@ -12,7 +12,7 @@ from src.aero.geometry import (
     body_profile,
     VehicleGeometry,
 )
-from src.aero.cfd_generators import (
+from project_icarus.aero.cfd_generators import (
     SweepSpec,
     run_sweep,
     save_sweep_hdf5,

@@ -1,17 +1,17 @@
 import numpy as np
 import pytest
 
-from src.scenarios.target_factory import (
+from project_icarus.scenarios.target_factory import (
     BallisticScenario,
     DecoyThreatScenario,
     ThreatSignatureLibrary,
 )
-from src.targets.decoy_model import DecoyModel
-from src.guidance.law import GuidanceLaw
-from src.guidance.seeker import DiscriminationModel
-from src.scenarios.presets import build_interceptor_config
-from src.scenarios.scenario import EngagementScenario
-from src.sim.api import run_engagement
+from project_icarus.targets.decoy_model import DecoyModel
+from project_icarus.guidance.law import GuidanceLaw
+from project_icarus.guidance.seeker import DiscriminationModel
+from project_icarus.scenarios.presets import build_interceptor_config
+from project_icarus.scenarios.scenario import EngagementScenario
+from project_icarus.sim.api import run_engagement
 
 
 class TestThreatSignatureLibrary:

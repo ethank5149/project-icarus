@@ -468,6 +468,58 @@ locations:
       - NATO European Phased Adaptive Approach (EPAA) Phase III
       - Armed with land-based SM-3 Block IIA interceptors
       - Operationalized to counter broader theater ballistic threats
+  # ---- Patriot / THAAD deployments (added for 2B.4 vehicle coverage) ----
+  # Coordinates are OSINT-approximate public deployment locations, NOT survey
+  # grade. The optional ``interceptor`` key selects which vehicle preset this
+  # site launches (overrides the tier-kind default in build_architecture_from_locations).
+  - name: Patriot PAC-3 Battery - Ramstein AB
+    state: Rhineland-Palatinate
+    country: Germany
+    coordinates:
+      latitude: 49.4367
+      longitude: 7.6004
+      altitude: 768
+    designation: interceptor-launch-site
+    interceptor: patriot
+    tags:
+      - MIM-104 Patriot / PAC-3 MSE
+      - U.S. European Command forward lower-tier point/area defense
+  - name: Patriot PAC-3 Battery - Riyadh
+    state: Riyadh Region
+    country: Saudi Arabia
+    coordinates:
+      latitude: 24.7136
+      longitude: 46.6753
+      altitude: 2001
+    designation: interceptor-launch-site
+    interceptor: patriot
+    tags:
+      - MIM-104 Patriot / PAC-3 MSE
+      - Lower-tier point/area defense of capital region
+  - name: THAAD Battery - Seongju
+    state: North Gyeongsang
+    country: Republic of Korea
+    coordinates:
+      latitude: 36.1324
+      longitude: 128.0960
+      altitude: 1493
+    designation: interceptor-launch-site
+    interceptor: thaad
+    tags:
+      - Terminal High Altitude Area Defense (THAAD)
+      - Lower/mid-tier endo/exo hit-to-kill defense
+  - name: THAAD Battery - Fort Bliss
+    state: Texas
+    country: United States
+    coordinates:
+      latitude: 31.8333
+      longitude: -106.4167
+      altitude: 4052
+    designation: interceptor-launch-site
+    interceptor: thaad
+    tags:
+      - Terminal High Altitude Area Defense (THAAD)
+      - U.S. Army THAAD training and operational home station
   # ==========================================
   # FOREIGN STRATEGIC LAUNCH COMPLEXES
   # ==========================================

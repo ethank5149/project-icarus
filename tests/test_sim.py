@@ -1,19 +1,20 @@
 import numpy as np
 import pytest
-from src.scenarios.target_factory import (
+from project_icarus.scenarios.target_factory import (
     BallisticScenario,
     FOBSScenario,
     HGVScenario,
     SuppressedScenario,
     SwarmScenario,
+    DecoyThreatScenario,
     GuidedThreatConfig,
     simulate_guided_threat,
     MU_EARTH,
     R_EARTH,
 )
-from src.guidance.terminal_guidance import TerminalGuidance
-from src.scenarios.scenario import EngagementScenario
-from src.scenarios.presets import (
+from project_icarus.guidance.terminal_guidance import TerminalGuidance
+from project_icarus.scenarios.scenario import EngagementScenario
+from project_icarus.scenarios.presets import (
     get_interceptor_presets,
     get_target_presets,
     interceptor_preset,
@@ -25,10 +26,10 @@ from src.scenarios.presets import (
     _WGS84_A,
     _WGS84_B,
 )
-from src.sim.api import run_engagement
-from src.sim.runner import EngagementRunner
-from src.interceptors.config import InterceptorConfig, GuidanceConfig
-from src.guidance.law import GuidanceLaw
+from project_icarus.sim.api import run_engagement
+from project_icarus.sim.runner import EngagementRunner
+from project_icarus.interceptors.config import InterceptorConfig, GuidanceConfig
+from project_icarus.guidance.law import GuidanceLaw
 
 
 class TestBallisticScenario:
@@ -180,6 +181,23 @@ class TestTargetPresets:
         state = preset.target.propagate(5.0)
         assert state.shape == (6,)
 
+    def test_target_preset_maneuvering_rv(self):
+        preset = target_preset("maneuvering_rv")
+        assert isinstance(preset.target, SuppressedScenario)
+        state = preset.target.propagate(50.0)
+        assert state.shape == (6,)
+        # The agile RV jinks, so a late-state propagation must differ from a
+        # straight ballistic trajectory at the same energy.
+        assert np.linalg.norm(preset.target.propagate(200.0)[:3]) > 0.0
+
+    def test_target_preset_advanced_decoy(self):
+        preset = target_preset("advanced_decoy_threat")
+        assert isinstance(preset.target, DecoyThreatScenario)
+        assert len(preset.target.decoys) == 2
+        feats = preset.target.decoy_features(200.0, seed=1)
+        assert len(feats) == 2
+        assert all(f.shape == (4,) for f in feats)
+
     def test_target_preset_invalid(self):
         with pytest.raises(KeyError):
             target_preset("nonexistent")
@@ -206,7 +224,7 @@ class TestEngagementRunner:
             assert len(result.monte_carlo.miss_distances) == 5
 
     def test_v0_computed_from_geometry(self):
-        from src.sim.runner import _compute_v0
+        from project_icarus.sim.runner import _compute_v0
         scenario = EngagementScenario(
             interceptor_launch_site=np.array([R_EARTH, 0.0, 0.0]),
             threat_axis=np.array([1.0, 0.0, 0.0]),
@@ -314,7 +332,7 @@ class TestThreatToDefended:
         assert state.shape == (6,)
 
     def test_build_threat_to_defended_helper(self):
-        from src.scenarios.presets import build_threat_to_defended
+        from project_icarus.scenarios.presets import build_threat_to_defended
 
         preset = build_threat_to_defended("Tatishchevo", "Washington D.C.")
         assert isinstance(preset.target, BallisticScenario)
@@ -329,7 +347,7 @@ class TestThreatToDefended:
             build_threat_to_defended("Kozelsk", "Nonexistent Target")
 
     def test_azimuth_and_range_physically_reasonable(self):
-        from src.scenarios.presets import geodetic_launch_to_target
+        from project_icarus.scenarios.presets import geodetic_launch_to_target
 
         # Short range should give modest speed; long range higher speed.
         short = geodetic_launch_to_target(34.74, -120.57, 361, 34.05, -118.24, 305)
@@ -343,7 +361,7 @@ class TestScenarioVariants:
     """All threat families should be geodetically aimed at the defended point."""
 
     def test_all_scenario_types_build(self):
-        from src.scenarios.presets import build_threat_to_defended
+        from project_icarus.scenarios.presets import build_threat_to_defended
 
         for sc in ("ballistic", "fobs", "hgv", "suppressed", "swarm"):
             preset = build_threat_to_defended("Kozelsk", "Washington D.C.", scenario_type=sc)
@@ -353,8 +371,8 @@ class TestScenarioVariants:
             assert abs(np.linalg.norm(preset.engagement.target_launch_site) - R_EARTH) < 50e3
 
     def test_fobs_reentry_aims_at_target(self):
-        from src.scenarios.presets import build_threat_to_defended
-        from src.scenarios.target_factory import FOBSScenario
+        from project_icarus.scenarios.presets import build_threat_to_defended
+        from project_icarus.scenarios.target_factory import FOBSScenario
 
         preset = build_threat_to_defended("Kozelsk", "Washington D.C.", scenario_type="fobs")
         assert isinstance(preset.target, FOBSScenario)
@@ -364,8 +382,8 @@ class TestScenarioVariants:
         assert dist < 8000e3
 
     def test_suppressed_maneuver_along_threat_axis(self):
-        from src.scenarios.presets import build_threat_to_defended
-        from src.scenarios.target_factory import SuppressedScenario
+        from project_icarus.scenarios.presets import build_threat_to_defended
+        from project_icarus.scenarios.target_factory import SuppressedScenario
 
         preset = build_threat_to_defended("Kozelsk", "Washington D.C.", scenario_type="suppressed")
         assert isinstance(preset.target, SuppressedScenario)
@@ -374,8 +392,8 @@ class TestScenarioVariants:
         assert np.linalg.norm(preset.target._maneuver_dir) > 0.0
 
     def test_hgv_inserted_at_glide_altitude(self):
-        from src.scenarios.presets import build_threat_to_defended
-        from src.scenarios.target_factory import HGVScenario
+        from project_icarus.scenarios.presets import build_threat_to_defended
+        from project_icarus.scenarios.target_factory import HGVScenario
 
         preset = build_threat_to_defended(
             "Kozelsk", "Washington D.C.", scenario_type="hgv", glide_alt_km=70.0
@@ -386,7 +404,7 @@ class TestScenarioVariants:
 
     def test_unknown_scenario_type_raises(self):
         import pytest
-        from src.scenarios.presets import geodetic_launch_to_target
+        from project_icarus.scenarios.presets import geodetic_launch_to_target
 
         with pytest.raises(ValueError):
             geodetic_launch_to_target(54.02, 35.46, 490, 38.90, -77.04, 40, scenario_type="bogus")
@@ -453,7 +471,7 @@ class TestGuidedThreat:
         assert miss_guided <= miss_ballistic
 
     def test_fobs_reentry_is_guided_solve(self):
-        from src.scenarios.presets import build_threat_to_defended
+        from project_icarus.scenarios.presets import build_threat_to_defended
 
         preset = build_threat_to_defended("Kozelsk", "Washington D.C.", scenario_type="fobs")
         target = preset.target

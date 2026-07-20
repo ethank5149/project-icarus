@@ -12,7 +12,7 @@ from typing import List, Optional, Sequence
 
 import numpy as np
 
-from src.sensors.sensor import Sensor
+from project_icarus.sensors.sensor import Sensor
 
 
 def load_sensors_from_locations(

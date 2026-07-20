@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from src.c2 import (
+from project_icarus.c2 import (
     build_architecture_from_locations,
     run_layered_campaign,
     run_discrete_event,
@@ -19,8 +19,8 @@ from src.c2 import (
     architecture_summary,
     national_metrics,
 )
-from src.c2.visualization import build_national_scene, coverage_summary_table
-from src.scenarios.presets import build_interceptor_config
+from project_icarus.c2.visualization import build_national_scene, coverage_summary_table
+from project_icarus.scenarios.presets import build_interceptor_config
 
 pytest.importorskip("pyvista")
 
@@ -38,13 +38,37 @@ def _raid(n, batteries, seed=0):
 class TestLayers:
     def test_architecture_from_locations(self):
         arch = build_architecture_from_locations(magazine_per_base=4, salvo_size=1)
-        # 7 interceptor-launch-site records in the DB.
-        assert len(arch.batteries) == 7
-        assert arch.total_magazine == 28
+        # 11 interceptor-launch-site records in the DB (7 legacy + Patriot/THAAD).
+        assert len(arch.batteries) == 11
+        assert arch.total_magazine == 44
         # All batteries carry a real interceptor config.
         for bat in arch.batteries:
             assert bat.interceptor_config is not None
             assert bat.magazine == 4
+
+    def test_architecture_selects_patriot_thaad_by_site(self):
+        # The new Patriot/THAAD deploy sites carry an ``interceptor`` key in
+        # reference/locations.yml; the architecture must build dedicated tiers
+        # for them (lower->patriot, mid->thaad) rather than the kind defaults.
+        arch = build_architecture_from_locations()
+        by_kind_interceptor = {
+            (t.kind, t.interceptor_name): t for ly in arch.layers for t in ly.tiers
+        }
+        assert by_kind_interceptor[("lower", "patriot")].bases
+        assert by_kind_interceptor[("mid", "thaad")].bases
+        # Patriot/THAAD batteries resolve to their own presets.
+        patriot_bats = [
+            b for b in arch.batteries
+            if b.interceptor_config.name.startswith("Patriot")
+        ]
+        thaad_bats = [
+            b for b in arch.batteries
+            if b.interceptor_config.name.startswith("THAAD")
+        ]
+        assert len(patriot_bats) == 2
+        assert len(thaad_bats) == 2
+        assert all(b.interceptor_config.kill_mechanism == "hit_to_kill"
+                   for b in patriot_bats + thaad_bats)
 
     def test_tier_kind_validation(self):
         cfg, g = build_interceptor_config("arrow3")
@@ -187,8 +211,8 @@ class TestLayeredCampaign:
 
 def _raid_with_targets(n, batteries, seed=0):
     """Build threats that carry a real target scenario (needed for run_engagement)."""
-    from src.scenarios.target_factory import BallisticScenario
-    from src.scenarios.presets import geodetic_to_ecef
+    from project_icarus.scenarios.target_factory import BallisticScenario
+    from project_icarus.scenarios.presets import geodetic_to_ecef
 
     rng = np.random.default_rng(seed)
     out = []
@@ -207,10 +231,10 @@ class TestLayeredParallelAndMetrics:
         # serial loop without invoking the (expensive) 6-DOF integrator per
         # pair. We stub ``run_engagement`` so the test validates the joblib
         # merge logic in isolation and stays fast in CI.
-        import src.sim.api as api
-        from src.c2 import run_campaign, CampaignThreat
-        from src.scenarios.presets import build_interceptor_config
-        from src.guidance.law import GuidanceLaw
+        import project_icarus.sim.api as api
+        from project_icarus.c2 import run_campaign, CampaignThreat
+        from project_icarus.scenarios.presets import build_interceptor_config
+        from project_icarus.guidance.law import GuidanceLaw
 
         cfg, g = build_interceptor_config("arrow3")
         glaw = GuidanceLaw(g)
@@ -224,7 +248,7 @@ class TestLayeredParallelAndMetrics:
         saved = api.run_engagement
         api.run_engagement = _stub
         try:
-            from src.scenarios.target_factory import BallisticScenario
+            from project_icarus.scenarios.target_factory import BallisticScenario
             threats = [
                 CampaignThreat(
                     target=BallisticScenario(r0=np.array([6.4e6, 0, 0]),
@@ -234,7 +258,7 @@ class TestLayeredParallelAndMetrics:
             ]
 
             def builder(th, bat):
-                from src.sim.api import EngagementScenario
+                from project_icarus.sim.api import EngagementScenario
                 return EngagementScenario(engagement_end=40.0)
 
             ser = run_campaign(threats, bats, builder, n_trials=1, parallel=False)
@@ -250,10 +274,14 @@ class TestLayeredParallelAndMetrics:
     def test_architecture_summary_rolls_up(self):
         arch = build_architecture_from_locations(magazine_per_base=4, salvo_size=1)
         summ = architecture_summary(arch)
-        assert summ["n_batteries"] == 7
-        assert summ["total_magazine"] == 28
-        assert summ["n_layers"] == 1  # all sites default to "upper" tier
-        assert summ["layers"][0]["total_magazine"] == 28
+        # 11 sites (7 legacy + Patriot/THAAD) across 2 layers (upper + regional).
+        assert summ["n_batteries"] == 11
+        assert summ["total_magazine"] == 44
+        assert summ["n_layers"] == 2
+        # Magazine rolls up correctly across both layers.
+        assert summ["total_magazine"] == sum(
+            ly["total_magazine"] for ly in summ["layers"]
+        )
 
     def test_national_metrics_aggregates(self):
         np.random.seed(7)
@@ -310,7 +338,9 @@ class TestNationalMap:
     def test_coverage_summary_table(self):
         arch = build_architecture_from_locations(magazine_per_base=4, salvo_size=1)
         rows = coverage_summary_table(arch)
-        assert len(rows) == len(arch.layers[0].tiers)
+        # One row per tier across all layers.
+        n_tiers = sum(len(ly.tiers) for ly in arch.layers)
+        assert len(rows) == n_tiers
         for row in rows:
             assert row["total_magazine"] == row["n_bases"] * row["magazine_per_base"]
 
@@ -322,7 +352,7 @@ _pytest.importorskip("panel")
 
 class TestDashboard:
     def test_dashboard_synthetic_run(self):
-        from src.c2.dashboard import NationalDashboard
+        from project_icarus.c2.dashboard import NationalDashboard
         dash = NationalDashboard()
         dash._do_reset()
         assert dash._scene_png is not None  # offscreen PyVista PNG rendered
@@ -343,15 +373,15 @@ class TestDashboard:
 class TestLayeredParallel:
     def test_layered_assess_none_serial_matches_contract(self):
         # The assess=None path must fan out via JSON specs and return metrics.
-        from src.c2.layers import run_layered_campaign
-        from src.c2.battle_manager import ThreatTrack, BattleManagerConfig
-        from src.scenarios.target_factory import BallisticScenario
-        from src.scenarios.scenario import EngagementScenario
+        from project_icarus.c2.layers import run_layered_campaign
+        from project_icarus.c2.battle_manager import ThreatTrack, BattleManagerConfig
+        from project_icarus.scenarios.target_factory import BallisticScenario
+        from project_icarus.scenarios.scenario import EngagementScenario
         import numpy as np
 
         arch = build_architecture_from_locations(magazine_per_base=2)
         # single-battery tiny arch for speed
-        from src.c2.layers import DefenseArchitecture, Layer, Tier
+        from project_icarus.c2.layers import DefenseArchitecture, Layer, Tier
         from reference.locations import locations_by_designation, coordinates_to_ecef
         tiny = DefenseArchitecture(name="tiny").add(
             Layer("upper_layer").add(Tier(kind="upper", interceptor_name="arrow3",

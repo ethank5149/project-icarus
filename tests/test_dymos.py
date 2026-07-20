@@ -4,7 +4,7 @@ import pytest
 dymos = pytest.importorskip("dymos")
 import warnings
 
-from src.optimization.trajectory_optimization import build_trajectory_problem
+from project_icarus.optimization.trajectory_optimization import build_trajectory_problem
 
 
 @pytest.fixture

@@ -2,10 +2,10 @@ import math
 import numpy as np
 import pytest
 
-from src.guidance.terminal_guidance import TerminalGuidance
-from src.guidance.law import GuidanceLaw
-from src.guidance.seeker import SeekerModel, SeekerConfig, DiscriminationModel
-from src.scenarios.presets import (
+from project_icarus.guidance.terminal_guidance import TerminalGuidance
+from project_icarus.guidance.law import GuidanceLaw
+from project_icarus.guidance.seeker import SeekerModel, SeekerConfig, DiscriminationModel
+from project_icarus.scenarios.presets import (
     build_interceptor_config,
     interceptor_config_preset,
     sample_interceptor_uq,

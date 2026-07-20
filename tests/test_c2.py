@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from src.c2 import (
+from project_icarus.c2 import (
     BattleManager,
     BattleManagerConfig,
     ThreatTrack,
@@ -13,10 +13,10 @@ from src.c2 import (
     run_discrete_event,
     C2Scenario,
 )
-from src.interceptors.config import InterceptorConfig, GuidanceConfig
-from src.scenarios.target_factory import BallisticScenario, R_EARTH
-from src.scenarios.scenario import EngagementScenario
-from src.sensors.sensor import SensorNetwork, Track
+from project_icarus.interceptors.config import InterceptorConfig, GuidanceConfig
+from project_icarus.scenarios.target_factory import BallisticScenario, R_EARTH
+from project_icarus.scenarios.scenario import EngagementScenario
+from project_icarus.sensors.sensor import SensorNetwork, Track
 
 
 def _interceptor():
@@ -209,8 +209,8 @@ class TestC2TrackDriven:
 
     def test_c2_latency_delays_engagement(self):
         # With C2 latency longer than the scenario span, no shots are fired.
-        from src.sensors.sensor import Sensor
-        from src.dynamics.coordinate_systems import geodetic_to_ecef
+        from project_icarus.sensors.sensor import Sensor
+        from project_icarus.dynamics.coordinate_systems import geodetic_to_ecef
 
         def _ecef(a, b, c=0):
             return np.asarray(geodetic_to_ecef(a, b, c), dtype=float)
@@ -241,8 +241,8 @@ class TestDiscreteEvent:
     def test_discrete_event_drives_engagement(self):
         # Build a 1-sensor network tracking a single moving target; the C2 loop
         # should confirm the track and fire at least one interceptor.
-        from src.sensors.sensor import Sensor
-        from src.dynamics.coordinate_systems import geodetic_to_ecef
+        from project_icarus.sensors.sensor import Sensor
+        from project_icarus.dynamics.coordinate_systems import geodetic_to_ecef
 
         def _ecef(a, b, c=0):
             return np.asarray(geodetic_to_ecef(a, b, c), dtype=float)
@@ -280,8 +280,8 @@ class TestDiscreteEvent:
         # The optional simpy.Environment clock must drive the same loop and
         # produce equivalent engagement outcomes to the pure-python stepper.
         import simpy
-        from src.sensors.sensor import Sensor
-        from src.dynamics.coordinate_systems import geodetic_to_ecef
+        from project_icarus.sensors.sensor import Sensor
+        from project_icarus.dynamics.coordinate_systems import geodetic_to_ecef
 
         def _ecef(a, b, c=0):
             return np.asarray(geodetic_to_ecef(a, b, c), dtype=float)

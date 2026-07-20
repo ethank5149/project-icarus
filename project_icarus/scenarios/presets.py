@@ -10,6 +10,7 @@ from .target_factory import (
     HGVScenario,
     SuppressedScenario,
     SwarmScenario,
+    DecoyThreatScenario,
     MU_EARTH,
     R_EARTH,
 )
@@ -533,6 +534,44 @@ _register(
     "Sea-launched swarm, 4 payloads, 2° spread",
 )
 
+# --- Advanced threat family (2C): agile RV + signature-evolving decoys ---
+
+_register(
+    "maneuvering_rv",
+    SuppressedScenario(
+        r0=np.array([R_EARTH, 0.0, 0.0]),
+        v0=np.array([0.0, 1100.0, 600.0]),
+        dip_alt_km=40.0,
+        midcourse_maneuver_mag=140.0,
+        maneuver_interval=12.0,
+    ),
+    EngagementScenario(engagement_end=350.0),
+    "Agile RV with frequent high-magnitude midcourse jinks (evasive)",
+)
+
+_register(
+    "advanced_decoy_threat",
+    DecoyThreatScenario(
+        rv=BallisticScenario(
+            r0=np.array([R_EARTH, 0.0, 0.0]),
+            v0=np.array([0.0, 1300.0, 700.0]),
+        ),
+        decoys=[
+            # Signature-evolving balloon decoy: tracks the RV's RCS/IR closely
+            # so the seeker/discriminator must use micro-motion + Doppler to
+            # separate the real RV from the clutter.
+            dict(mass=45.0, area=0.12, cd=0.55, radar_rcs_bias=0.9,
+                 ir_bias=0.85, release_altitude=55e3),
+            dict(mass=55.0, area=0.10, cd=0.50, radar_rcs_bias=1.1,
+                 ir_bias=0.7, release_altitude=60e3),
+        ],
+        release_t=180.0,
+    ),
+    EngagementScenario(engagement_end=350.0),
+    "RV + 2 signature-evolving balloon decoys released in midcourse",
+)
+
+
 # --- Geodetic target presets: Russia / China / regional threats ---
 
 # Russia
@@ -947,10 +986,69 @@ def _build_gmd() -> dict:
     )
 
 
+def _build_patriot() -> dict:
+    # OSINT-approximate PAC-3 MSE: endoatmospheric lower-tier point/area defense,
+    # radar seeker, hit-to-kill. Mass/Isp/stages are illustrative research
+    # defaults, NOT controlled data.
+    return dict(
+        name="Patriot PAC-3 MSE (endoatmospheric hit-to-kill)",
+        mass=350.0,
+        area=0.05,
+        ref_length=0.25,
+        kill_radius=0.5,
+        kill_mechanism="hit_to_kill",
+        accel_limit=600.0,
+        seeker_snr=18.0,
+        inertia=np.diag([3.0, 6.0, 8.0]),
+        mkv_mass=25.0,
+        mkv_divert_impulse=120.0,
+        stages=[
+            StageSpec(thrust=_constant_thrust(180e3), burn_time=4.0,
+                      wet_mass=300.0, dry_mass=50.0, Isp=250.0, name="booster"),
+        ],
+        guidance=dict(
+            midcourse_n=5.0, midcourse_accel_limit=120.0, terminal_n=4.0,
+            terminal_accel_limit=600.0, terminal_guidance_law="sdre_mpc",
+            seeker_mode="radar", seeker_fov_deg=55.0, ukf_enabled=True,
+            zem_horizon=3.0,
+        ),
+    )
+
+
+def _build_thaad() -> dict:
+    # OSINT-approximate THAAD: lower/mid-tier hit-to-kill, terminal IR seeker,
+    # engages endo- and exo-atmospheric. Mass/Isp/stages are illustrative research
+    # defaults, NOT controlled data.
+    return dict(
+        name="THAAD (endo/exo hit-to-kill)",
+        mass=900.0,
+        area=0.10,
+        ref_length=0.35,
+        kill_radius=0.5,
+        kill_mechanism="hit_to_kill",
+        accel_limit=550.0,
+        seeker_snr=20.0,
+        inertia=np.diag([20.0, 40.0, 50.0]),
+        mkv_mass=40.0,
+        mkv_divert_impulse=160.0,
+        stages=[
+            StageSpec(thrust=_constant_thrust(500e3), burn_time=6.0,
+                      wet_mass=800.0, dry_mass=100.0, Isp=260.0, name="booster"),
+        ],
+        guidance=dict(
+            midcourse_n=5.0, midcourse_accel_limit=120.0, terminal_n=4.0,
+            terminal_accel_limit=550.0, terminal_guidance_law="apn",
+            seeker_mode="ir", seeker_fov_deg=60.0, ukf_enabled=True,
+        ),
+    )
+
+
 _INTERCEPTOR_BUILDERS: Dict[str, callable] = {
     "arrow3": _build_arrow3,
     "tamir": _build_tamir,
     "gmd": _build_gmd,
+    "patriot": _build_patriot,
+    "thaad": _build_thaad,
 }
 
 
@@ -965,8 +1063,9 @@ def build_interceptor_config(name: str) -> Tuple[InterceptorConfig, GuidanceConf
     """Build an interceptor preset by name.
 
     Returns ``(InterceptorConfig, GuidanceConfig)``. Supported names:
-    ``arrow3``, ``tamir``, ``gmd``. Each bundles a multi-stage thrust model
-    and a calibrated GuidanceConfig selecting one of the 2B.2 terminal backends.
+    ``arrow3``, ``tamir``, ``gmd``, ``patriot``, ``thaad``. Each bundles a
+    multi-stage thrust model and a calibrated GuidanceConfig selecting one of
+    the 2B.2 terminal backends.
     """
     if name not in _INTERCEPTOR_BUILDERS:
         raise KeyError(

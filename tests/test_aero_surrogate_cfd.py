@@ -4,9 +4,9 @@ import tempfile
 import numpy as np
 import pytest
 
-from src.aero.cfd_generators import default_spec, sweep_to_hdf5
-from src.surrogates.train_gpr import MultiOutputGPR, load_data, train_gpr, COEFF_NAMES
-from src.surrogates.aero_surrogate import AeroSurrogateComponent, COEFF_NAMES, FEAT
+from project_icarus.aero.cfd_generators import default_spec, sweep_to_hdf5
+from project_icarus.surrogates.train_gpr import MultiOutputGPR, load_data, train_gpr, COEFF_NAMES
+from project_icarus.surrogates.aero_surrogate import AeroSurrogateComponent, COEFF_NAMES, FEAT
 from openmdao.api import Problem, Group, IndepVarComp
 
 

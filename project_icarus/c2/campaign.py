@@ -46,7 +46,7 @@ def _serialize_target(target) -> Dict[str, Any]:
 
 def _deserialize_target(spec: Dict[str, Any]):
     """Rebuild a TargetScenario from its serialized spec."""
-    from src.scenarios.target_factory import BallisticScenario
+    from project_icarus.scenarios.target_factory import BallisticScenario
     kind = spec.get("kind", "BallisticScenario")
     if kind == "BallisticScenario":
         r0 = np.asarray(spec["r0"], dtype=float)
@@ -68,7 +68,7 @@ def _serialize_scenario(scn) -> Dict[str, Any]:
 
 
 def _deserialize_scenario(spec: Dict[str, Any]):
-    from src.sim.api import EngagementScenario
+    from project_icarus.sim.api import EngagementScenario
     return EngagementScenario(**{k: (np.asarray(v, dtype=float) if isinstance(v, list) else v)
                                for k, v in spec.items()})
 

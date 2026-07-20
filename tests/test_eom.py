@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
-from src.dynamics.atmosphere import Atmosphere
-from src.dynamics.coordinate_systems import (
+from project_icarus.dynamics.atmosphere import Atmosphere
+from project_icarus.dynamics.coordinate_systems import (
     quat_multiply,
     quat_normalize,
     quat_to_dcm,
@@ -10,9 +10,9 @@ from src.dynamics.coordinate_systems import (
     rotate_inertial_to_body,
     dcm_to_quat,
 )
-from src.dynamics.eom_6dof import EOM6DOF, geodetic_altitude
-from src.dynamics.gravity import gravity_inertial, R_EARTH
-from src.dynamics.gravity import MU_EARTH, R_EARTH
+from project_icarus.dynamics.eom_6dof import EOM6DOF, geodetic_altitude
+from project_icarus.dynamics.gravity import gravity_inertial, R_EARTH
+from project_icarus.dynamics.gravity import MU_EARTH, R_EARTH
 
 
 class TestAtmosphere:
@@ -358,7 +358,7 @@ class TestGravity:
 
 class TestNRLMSISEAtmosphere:
     def test_uses_nrlmsise(self):
-        from src.dynamics.atmosphere import _HAVE_NRLMSISE
+        from project_icarus.dynamics.atmosphere import _HAVE_NRLMSISE
         if not _HAVE_NRLMSISE:
             pytest.skip("nrlmsise00 not installed")
         atm = Atmosphere()
@@ -370,7 +370,7 @@ class TestNRLMSISEAtmosphere:
         assert rho[0] > rho[1] > rho[2]
 
     def test_high_solar_activity_increases_density(self):
-        from src.dynamics.atmosphere import _HAVE_NRLMSISE
+        from project_icarus.dynamics.atmosphere import _HAVE_NRLMSISE
         if not _HAVE_NRLMSISE:
             pytest.skip("nrlmsise00 not installed")
         atm = Atmosphere()
@@ -381,7 +381,7 @@ class TestNRLMSISEAtmosphere:
         assert active > quiet
 
     def test_geomagnetic_storm_increases_density(self):
-        from src.dynamics.atmosphere import _HAVE_NRLMSISE
+        from project_icarus.dynamics.atmosphere import _HAVE_NRLMSISE
         if not _HAVE_NRLMSISE:
             pytest.skip("nrlmsise00 not installed")
         atm = Atmosphere()
@@ -392,7 +392,7 @@ class TestNRLMSISEAtmosphere:
         assert storm > quiet
 
     def test_temperature_finite(self):
-        from src.dynamics.atmosphere import _HAVE_NRLMSISE
+        from project_icarus.dynamics.atmosphere import _HAVE_NRLMSISE
         if not _HAVE_NRLMSISE:
             pytest.skip("nrlmsise00 not installed")
         atm = Atmosphere()
@@ -432,7 +432,7 @@ class TestHigherOrderGravity:
         assert d < 1e-4
 
     def test_legendre_zonal(self):
-        from src.dynamics.gravity import _legendre_zonal
+        from project_icarus.dynamics.gravity import _legendre_zonal
         assert np.isclose(_legendre_zonal(0, 0.3), 1.0)
         assert np.isclose(_legendre_zonal(1, 0.3), 0.3)
         assert np.isclose(_legendre_zonal(2, 0.0), -0.5)

@@ -4,8 +4,8 @@ import pytest
 dymos = pytest.importorskip("dymos")
 import warnings
 
-from src.optimization.trajectory_optimization import build_trajectory_problem
-from src.optimization.phases.terminal_phase import ClosedLoopTerminalODE, TerminalODE
+from project_icarus.optimization.trajectory_optimization import build_trajectory_problem
+from project_icarus.optimization.phases.terminal_phase import ClosedLoopTerminalODE, TerminalODE
 
 
 def _closed_loop_terminal_phase(law="pn", n_seg=6, maxiter=20):

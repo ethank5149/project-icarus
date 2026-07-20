@@ -12,9 +12,9 @@ Lightweight, deterministic (seeded RNG), and fast (<5 s total). Validates:
 import numpy as np
 import pytest
 
-from src.dynamics.coordinate_systems import geodetic_to_ecef
-from src.sensors.sensor import Detection, Sensor, SensorNetwork, Track
-from src.sensors.network import load_sensors_from_locations
+from project_icarus.dynamics.coordinate_systems import geodetic_to_ecef
+from project_icarus.sensors.sensor import Detection, Sensor, SensorNetwork, Track
+from project_icarus.sensors.network import load_sensors_from_locations
 
 
 def _ecef(lat_deg, lon_deg, alt_m=0.0):

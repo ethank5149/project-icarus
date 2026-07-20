@@ -20,8 +20,8 @@ import pytest
 class TestCampaignHDF5:
     def test_hdf5_roundtrip_small(self):
         # Build a tiny synthetic CampaignResult shim and exercise save/load.
-        from src.c2.battle_manager import BattleResult, ThreatTrack, Battery
-        from src.c2.persistence import save_campaign_hdf5, load_campaign_hdf5
+        from project_icarus.c2.battle_manager import BattleResult, ThreatTrack, Battery
+        from project_icarus.c2.persistence import save_campaign_hdf5, load_campaign_hdf5
 
         threats = [ThreatTrack(threat_id=i, target=None,
                               aim_point=np.zeros(3)) for i in range(3)]
@@ -52,7 +52,7 @@ class TestCampaignHDF5:
         assert loaded["shots"][1]["kill"] is False
 
     def test_hdf5_engagement_results(self):
-        from src.c2.persistence import save_campaign_hdf5, load_campaign_hdf5
+        from project_icarus.c2.persistence import save_campaign_hdf5, load_campaign_hdf5
 
         # A minimal object exposing the EngagementResult-shaped attributes.
         class _Eng:
@@ -86,16 +86,16 @@ class TestParallelTransport:
         # The parallel worker rebuilds interceptors by NAME (no pickle of the
         # lambda thrust profile). Validate the spec serializer + worker return
         # a plain dict (portable) identical in shape to the serial path.
-        from src.c2 import run_campaign, CampaignThreat
-        from src.c2.campaign import (
+        from project_icarus.c2 import run_campaign, CampaignThreat
+        from project_icarus.c2.campaign import (
             _serialize_target, _deserialize_target,
             _serialize_scenario, _deserialize_scenario,
             _run_one_pair_spec, _interceptor_name,
         )
-        from src.scenarios.presets import build_interceptor_config
-        from src.scenarios.target_factory import BallisticScenario
-        from src.sim.api import EngagementScenario
-        from src.guidance.law import GuidanceLaw
+        from project_icarus.scenarios.presets import build_interceptor_config
+        from project_icarus.scenarios.target_factory import BallisticScenario
+        from project_icarus.sim.api import EngagementScenario
+        from project_icarus.guidance.law import GuidanceLaw
 
         cfg, g = build_interceptor_config("arrow3")
         glaw = GuidanceLaw(g)

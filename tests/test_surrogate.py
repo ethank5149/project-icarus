@@ -1,12 +1,12 @@
 import numpy as np
 import pytest
-from src.aero.aero_analytical import (
+from project_icarus.aero.aero_analytical import (
     newtonian_cd_exo,
     newtonian_sideforce_moments_exo,
     linear_viscous_endo,
     blended_aero,
 )
-from src.surrogates.uncertainty import UncertaintyPropagator
+from project_icarus.surrogates.uncertainty import UncertaintyPropagator
 
 
 class TestAeroAnalytical:

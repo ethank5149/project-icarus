@@ -149,26 +149,41 @@ def build_architecture_from_locations(
     sites = groups.get("interceptor-launch-site", [])
     interceptor_kind_map = interceptor_kind_map or {}
 
-    by_kind: Dict[str, Dict[str, np.ndarray]] = {k: {} for k in _TIER_KINDS}
+    # Group sites by (tier kind, interceptor preset). A per-site ``interceptor``
+    # key on the location record overrides the kind-default preset, so e.g. a
+    # Patriot/THAAD site lands in its own tier rather than the generic lower tier.
+    by_kind_interceptor: Dict[Tuple[str, str], Dict[str, np.ndarray]] = {}
     for rec in sites:
-        kind = interceptor_kind_map.get(rec["name"], "upper")
-        by_kind[kind][rec["name"]] = coordinates_to_ecef(rec)
+        interceptor_name = rec.get("interceptor")
+        if rec["name"] in interceptor_kind_map:
+            kind = interceptor_kind_map[rec["name"]]
+        elif interceptor_name is not None:
+            # Per-site vehicle key -> OSINT-approximate tier-kind fallback.
+            kind = _KIND_FOR_INTERCEPTOR.get(interceptor_name, "upper")
+        else:
+            kind = "upper"
+        interceptor_name = interceptor_name or _interceptor_for_kind(kind)
+        by_kind_interceptor.setdefault((kind, interceptor_name), {})[rec["name"]] = (
+            coordinates_to_ecef(rec)
+        )
 
     arch = DefenseArchitecture(name="golden_dome")
     # Order matters: boost -> upper -> mid -> lower (outside-in engagement).
+    # mid + lower share the SAME regional layer instance so both tiers are
+    # preserved when the architecture is assembled below.
+    mid_layer = Layer("mid_layer")
     layer_for: Dict[str, Layer] = {
         "boost": Layer("boost_layer"),
         "upper": Layer("upper_layer"),
-        "mid": Layer("mid_layer"),
-        "lower": Layer("mid_layer"),  # mid + lower share the regional layer
+        "mid": mid_layer,
+        "lower": mid_layer,
     }
-    for kind in ("boost", "upper", "mid", "lower"):
-        locs = by_kind[kind]
+    for (kind, interceptor_name), locs in by_kind_interceptor.items():
         if not locs:
             continue
         tier = Tier(
             kind=kind,
-            interceptor_name=_interceptor_for_kind(kind),
+            interceptor_name=interceptor_name,
             bases=list(locs.values()),
             magazine_per_base=magazine_per_base,
             salvo_size=salvo_size,
@@ -190,6 +205,17 @@ def _interceptor_for_kind(kind: str) -> str:
         "mid": "arrow3",
         "lower": "tamir",
     }[kind]
+
+
+# When a site record sets an ``interceptor`` key but no explicit tier kind
+# (via ``interceptor_kind_map``), fall back to this OSINT-approximate
+# kind classification so the vehicle lands in a plausible engagement regime.
+_KIND_FOR_INTERCEPTOR = {
+    "gmd": "boost",
+    "arrow3": "upper",
+    "patriot": "lower",
+    "thaad": "mid",
+}
 
 
 # ---------------------------------------------------------------------------

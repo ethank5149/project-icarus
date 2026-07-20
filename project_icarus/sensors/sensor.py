@@ -21,7 +21,7 @@ from typing import List, Optional, Sequence
 import numpy as np
 from scipy.stats import norm
 
-from src.dynamics.coordinate_systems import ecef_to_geodetic, geodetic_to_ecef
+from project_icarus.dynamics.coordinate_systems import ecef_to_geodetic, geodetic_to_ecef
 
 
 def _confidence(sigma: float) -> float:

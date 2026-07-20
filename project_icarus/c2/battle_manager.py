@@ -294,7 +294,7 @@ class BattleManager:
             to drop). When ``None``, tracks are associated to the nearest
             pre-registered ``ThreatTrack.aim_point``.
         """
-        from src.sensors.sensor import Track  # M-of-N confirmed track
+        from project_icarus.sensors.sensor import Track  # M-of-N confirmed track
 
         for bat in self.batteries:
             bat._capacity = bat.magazine

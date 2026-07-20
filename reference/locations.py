@@ -30,7 +30,7 @@ def locations_by_name(path: str = _LOCATIONS_YAML) -> dict:
 
 def coordinates_to_ecef(record: dict) -> np.ndarray:
     """Convert a location record's geodetic coordinates to ECEF (meters)."""
-    from src.scenarios.presets import geodetic_to_ecef
+    from project_icarus.scenarios.presets import geodetic_to_ecef
 
     coord = record["coordinates"]
     return geodetic_to_ecef(

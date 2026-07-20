@@ -14,7 +14,7 @@ A small interactive dashboard that drives a national layered campaign end to end
 
 Run it with::
 
-    panel serve src/c2/dashboard.py --show
+    panel serve project_icarus/c2/dashboard.py --show
 
 The dashboard is intentionally light: the default (synthetic assess) evaluates in
 well under a second so the controls are responsive; ticking *real engagements*

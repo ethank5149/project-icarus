@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
-from src.guidance.boost_guidance import BoostGuidance
-from src.guidance.midcourse_guidance import MidcourseGuidance
-from src.guidance.terminal_guidance import TerminalGuidance
+from project_icarus.guidance.boost_guidance import BoostGuidance
+from project_icarus.guidance.midcourse_guidance import MidcourseGuidance
+from project_icarus.guidance.terminal_guidance import TerminalGuidance
 
 
 class TestBoostGuidance:
