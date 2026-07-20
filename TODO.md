@@ -1,2 +1,3 @@
 - Extend and fortify target ICBM, Cruise Missile, and HGV trajectory modeling and simulations to be physically accurate for any given target launch site and defended target pair.
 - Thoroughly inspect entire codebase for potential efficiency improvements (more advanced algorithms, parallelization, vectorization, etc), make sure to intelligently and creatively utilize existing nvidia gpu hardware.
+- Implement physically accurate (CAD) models for each interceptor and target vehicle in the library for CFD data generation.

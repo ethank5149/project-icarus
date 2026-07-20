@@ -9,6 +9,7 @@ from ..dynamics.eom_6dof import EOM6DOF
 from ..guidance.terminal_guidance import TerminalGuidance
 from ..aero.aero_analytical import blended_aero
 from ..dynamics.atmosphere import Atmosphere
+from ..dynamics.gravity import gravity_inertial
 
 
 MU_EARTH = 3.986004418e14
@@ -16,19 +17,24 @@ R_EARTH = 6371e3
 J2_EARTH = 1.08263e-3
 
 
-def _two_body_accel(r, use_j2=True):
-    r = np.asarray(r, dtype=float)
-    rmag = np.linalg.norm(r)
-    if rmag < 1e-6:
-        return np.zeros(3)
-    a = -MU_EARTH / rmag**3 * r
-    if use_j2 and rmag - R_EARTH > 50e3:
-        z = r[2]
-        factor = -MU_EARTH / (rmag**5) * (
-            1.0 + 1.5 * J2_EARTH * (R_EARTH / rmag)**2 * (5.0 * (z / rmag)**2 - 1.0)
-        )
-        a = factor * r
-    return a
+def _two_body_accel(r, use_j2=True, use_j3=False, use_j4=False,
+                     use_high_order=False, use_third_body=False, use_tides=False,
+                     max_degree=10, t=0.0):
+    """Central + zonal + third-body + tidal acceleration (thin wrapper over gravity_inertial)."""
+    return gravity_inertial(
+        r,
+        use_j2=use_j2,
+        j2=J2_EARTH,
+        j3=-2.532e-6,
+        j4=-1.610e-6,
+        use_high_order=use_high_order,
+        use_third_body=use_third_body,
+        use_tides=use_tides,
+        t=t,
+        use_j3=use_j3,
+        use_j4=use_j4,
+        max_degree=max_degree,
+    )
 
 
 def _rk4_step(r, v, dt, accel_func):
@@ -221,16 +227,34 @@ class BallisticScenario:
     r0: np.ndarray = field(default_factory=lambda: np.zeros(3))
     v0: np.ndarray = field(default_factory=lambda: np.zeros(3))
     use_j2: bool = True
+    use_j3: bool = False
+    use_j4: bool = False
+    use_high_order: bool = False
+    use_third_body: bool = False
+    use_tides: bool = False
+    max_degree: int = 10
+    adaptive: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def _accel(self, r, v):
+        return _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
+                               use_j4=self.use_j4, use_high_order=self.use_high_order,
+                               use_third_body=self.use_third_body, use_tides=self.use_tides,
+                               max_degree=self.max_degree)
+
     def propagate(self, t: float) -> np.ndarray:
-        # Closed-form two-body propagation via the universal-variable Kepler
-        # algorithm. This is O(1) in t (a single Kepler solve per call) rather
-        # than a per-step loop, which matters because ``propagate`` is invoked
-        # thousands of times per engagement (once per integrator step). The J2
-        # perturbation is intentionally ignored here for speed; the threat
-        # trajectory is a kinematic reference path fed into the closed-loop RHS.
+        if self.adaptive or self.use_j3 or self.use_j4 or self.use_third_body or self.use_tides:
+            return self._propagate_integrated(t)
         return _kepler_propagate(self.r0.astype(float), self.v0.astype(float), t, MU_EARTH)
+
+    def _propagate_integrated(self, t: float) -> np.ndarray:
+        r = self.r0.astype(float).copy()
+        v = self.v0.astype(float).copy()
+        dt = 0.5
+        n = max(int(t / dt), 1)
+        for _ in range(n):
+            r, v = _rk4_step(r, v, dt, self._accel)
+        return np.concatenate([r, v])
 
 
 def _kepler_propagate(r0, v0, t, mu):
@@ -318,6 +342,12 @@ class FOBSScenario:
     vehicle: Any = None
     guidance: Any = None
     use_j2: bool = True
+    use_j3: bool = False
+    use_j4: bool = False
+    use_high_order: bool = False
+    use_third_body: bool = False
+    use_tides: bool = False
+    max_degree: int = 10
     metadata: Dict[str, Any] = field(default_factory=dict)
     _cache: Any = field(default=None, repr=False)
 
@@ -362,7 +392,10 @@ class FOBSScenario:
         v = self.v0.astype(float).copy()
         for _ in boost_t:
             boost_states.append(np.concatenate([r.copy(), v.copy()]))
-            a = _two_body_accel(r) + np.array([self.thrust, 0.0, 0.0])
+            a = _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
+                                use_j4=self.use_j4, use_high_order=self.use_high_order,
+                                use_third_body=self.use_third_body, use_tides=self.use_tides,
+                                max_degree=self.max_degree) + np.array([self.thrust, 0.0, 0.0])
             v = v + a * dt_boost
             r = r + v * dt_boost
         boost_states.append(np.concatenate([r.copy(), v.copy()]))
@@ -376,7 +409,10 @@ class FOBSScenario:
         rc, vc = r_coast.copy(), v_coast.copy()
         for _ in coast_t:
             coast_states.append(np.concatenate([rc.copy(), vc.copy()]))
-            a = _two_body_accel(rc, use_j2=self.use_j2)
+            a = _two_body_accel(rc, use_j2=self.use_j2, use_j3=self.use_j3,
+                                use_j4=self.use_j4, use_high_order=self.use_high_order,
+                                use_third_body=self.use_third_body, use_tides=self.use_tides,
+                                max_degree=self.max_degree)
             vc = vc + a * dt_coast
             rc = rc + vc * dt_coast
         coast_states.append(np.concatenate([rc.copy(), vc.copy()]))
@@ -451,6 +487,13 @@ class HGVScenario:
     cl: float = 0.3
     skip_threshold_deg: float = 2.0
     use_j2: bool = True
+    use_j3: bool = False
+    use_j4: bool = False
+    use_high_order: bool = False
+    use_third_body: bool = False
+    use_tides: bool = False
+    max_degree: int = 10
+    adaptive: bool = False
     atmosphere: Optional[Atmosphere] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -461,7 +504,10 @@ class HGVScenario:
     def _accel(self, r, v):
         vmag = np.linalg.norm(v)
         if vmag < 1e-6:
-            return _two_body_accel(r, use_j2=self.use_j2)
+            return _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
+                                   use_j4=self.use_j4, use_high_order=self.use_high_order,
+                                   use_third_body=self.use_third_body, use_tides=self.use_tides,
+                                   max_degree=self.max_degree)
         g_unit = -r / np.linalg.norm(r)
         v_unit = v / vmag
         lift_dir = g_unit - np.dot(g_unit, v_unit) * v_unit
@@ -470,7 +516,10 @@ class HGVScenario:
             lift_dir = lift_dir / lift_norm
         else:
             lift_dir = np.zeros(3)
-        a_grav = _two_body_accel(r, use_j2=self.use_j2)
+        a_grav = _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
+                                 use_j4=self.use_j4, use_high_order=self.use_high_order,
+                                 use_third_body=self.use_third_body, use_tides=self.use_tides,
+                                 max_degree=self.max_degree)
         alt = np.linalg.norm(r) - R_EARTH
         a_drag = np.zeros(3)
         a_lift = np.zeros(3)
@@ -484,6 +533,8 @@ class HGVScenario:
         return a_grav + a_drag + a_lift
 
     def propagate(self, t: float) -> np.ndarray:
+        if self.adaptive:
+            return self._propagate_adaptive(t)
         r = self.r0.astype(float).copy()
         v = self.v0.astype(float).copy()
         dt = 0.5
@@ -491,6 +542,32 @@ class HGVScenario:
         for _ in range(n):
             r, v = _rk4_step(r, v, dt, self._accel)
         return np.concatenate([r, v])
+
+    def _propagate_adaptive(self, t: float) -> np.ndarray:
+        r = self.r0.astype(float).copy()
+        v = self.v0.astype(float).copy()
+        y0 = np.concatenate([r, v])
+
+        def rhs(ti, y):
+            r, v = y[:3], y[3:]
+            a = self._accel(r, v)
+            return np.concatenate([v, a])
+
+        def ground_event(ti, y):
+            return np.linalg.norm(y[:3]) - R_EARTH
+        ground_event.terminal = True
+        ground_event.direction = -1
+
+        sol = solve_ivp(rhs, (0.0, t), y0, method="RK45",
+                        rtol=1e-6, atol=1e-9, max_step=5.0,
+                        events=ground_event, dense_output=True)
+        if sol.t_events[0] is not None and len(sol.t_events[0]) > 0:
+            t_end_eff = float(sol.t_events[0][0])
+        else:
+            t_end_eff = float(sol.t[-1])
+        if t_end_eff <= 0.0:
+            return np.concatenate([r, v])
+        return sol.sol(t_end_eff)[:6]
 
     @classmethod
     def from_params(cls, max_alt_km: float, lateral_range_km: float, speed_mach: float = 10.0):
@@ -508,12 +585,17 @@ class SuppressedScenario:
     dip_alt_km: float = 50.0
     midcourse_maneuver_mag: float = 50.0
     maneuver_interval: float = 30.0
+    use_j2: bool = True
+    use_j3: bool = False
+    use_j4: bool = False
+    use_high_order: bool = False
+    use_third_body: bool = False
+    use_tides: bool = False
+    max_degree: int = 10
+    adaptive: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
-        # Maneuver direction: horizontal component of the launch velocity
-        # (threat axis), so midcourse jinking stays aligned with the aim point
-        # rather than a hardcoded +y body axis.
         vmag = np.linalg.norm(self.v0)
         if vmag > 1e-6:
             horiz = self.v0.copy()
@@ -523,8 +605,15 @@ class SuppressedScenario:
         else:
             self._maneuver_dir = np.array([1.0, 0.0, 0.0])
 
+    def _accel(self, r, v):
+        return _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
+                               use_j4=self.use_j4, use_high_order=self.use_high_order,
+                               use_third_body=self.use_third_body, use_tides=self.use_tides,
+                               max_degree=self.max_degree)
+
     def propagate(self, t: float) -> np.ndarray:
-        # Inverse-square gravity with midcourse delta-v impulses.
+        if self.adaptive:
+            return self._propagate_adaptive(t)
         r = self.r0.astype(float).copy()
         v = self.v0.astype(float).copy()
         dt = 0.5
@@ -532,17 +621,41 @@ class SuppressedScenario:
         applied = set()
         for k in range(n):
             tc = (k + 1) * dt
-            a = _two_body_accel(r)
+            a = self._accel(r, v)
             v = v + a * dt
             r = r + v * dt
-            # Delta-v impulse (velocity change, not addition) at maneuver times,
-            # applied along the threat axis (horizontal launch direction).
             if tc > 60.0:
                 m = int(tc / self.maneuver_interval)
                 if m % 2 == 0 and m not in applied:
                     v = v + self.midcourse_maneuver_mag * self._maneuver_dir
                     applied.add(m)
         return np.concatenate([r, v])
+
+    def _propagate_adaptive(self, t: float) -> np.ndarray:
+        r = self.r0.astype(float).copy()
+        v = self.v0.astype(float).copy()
+        y0 = np.concatenate([r, v])
+
+        def rhs(ti, y):
+            r, v = y[:3], y[3:]
+            a = self._accel(r, v)
+            return np.concatenate([v, a])
+
+        def ground_event(ti, y):
+            return np.linalg.norm(y[:3]) - R_EARTH
+        ground_event.terminal = True
+        ground_event.direction = -1
+
+        sol = solve_ivp(rhs, (0.0, t), y0, method="RK45",
+                        rtol=1e-6, atol=1e-9, max_step=5.0,
+                        events=ground_event, dense_output=True)
+        if sol.t_events[0] is not None and len(sol.t_events[0]) > 0:
+            t_end_eff = float(sol.t_events[0][0])
+        else:
+            t_end_eff = float(sol.t[-1])
+        if t_end_eff <= 0.0:
+            return np.concatenate([r, v])
+        return sol.sol(t_end_eff)[:6]
 
 
 @dataclass
@@ -697,6 +810,13 @@ class CruiseMissileScenario:
     isp: float = 3000.0
     terminal_dive_angle_deg: float = 45.0
     terminal_range_km: float = 50.0
+    use_j2: bool = True
+    use_j3: bool = False
+    use_j4: bool = False
+    use_high_order: bool = False
+    use_third_body: bool = False
+    use_tides: bool = False
+    max_degree: int = 10
     metadata: Dict[str, Any] = field(default_factory=dict)
     _cache: Any = field(default=None, repr=False)
 
@@ -715,7 +835,10 @@ class CruiseMissileScenario:
 
         def boost_accel(r, v):
             a_thrust = self.boost_thrust / max(m, 1e-6) * v_unit
-            a_grav = _two_body_accel(r, use_j2=True)
+            a_grav = _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
+                                     use_j4=self.use_j4, use_high_order=self.use_high_order,
+                                     use_third_body=self.use_third_body, use_tides=self.use_tides,
+                                     max_degree=self.max_degree)
             alt = np.linalg.norm(r) - R_EARTH
             rho = atmo.density_scalar(max(alt, 0.0))
             q_dyn = 0.5 * rho * vmag**2
@@ -773,7 +896,10 @@ class CruiseMissileScenario:
                     horiz = np.array([1.0, 0.0, 0.0])
             dive_v = horiz * np.cos(dive_angle) + radial * (-np.sin(dive_angle))
             dive_v = dive_v / max(np.linalg.norm(dive_v), 1e-9) * cruise_speed
-            a_grav = _two_body_accel(r, use_j2=True)
+            a_grav = _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
+                                     use_j4=self.use_j4, use_high_order=self.use_high_order,
+                                     use_third_body=self.use_third_body, use_tides=self.use_tides,
+                                     max_degree=self.max_degree)
             return a_grav + dive_v * 3.0
 
         for _ in dive_t:
