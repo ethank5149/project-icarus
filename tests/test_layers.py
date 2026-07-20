@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from src.c2 import (
     build_architecture_from_locations,
@@ -15,8 +16,13 @@ from src.c2 import (
     BattleManager,
     BattleManagerConfig,
     Battery,
+    architecture_summary,
+    national_metrics,
 )
+from src.c2.visualization import build_national_scene, coverage_summary_table
 from src.scenarios.presets import build_interceptor_config
+
+pytest.importorskip("pyvista")
 
 
 def _raid(n, batteries, seed=0):
@@ -177,3 +183,134 @@ class TestLayeredCampaign:
         assert r["c2_diag"]["n_tasked"] == 6
         assert r["battle"].n_defeated == 0
         assert r["battle"].n_leakage == 6
+
+
+def _raid_with_targets(n, batteries, seed=0):
+    """Build threats that carry a real target scenario (needed for run_engagement)."""
+    from src.scenarios.target_factory import BallisticScenario
+    from src.scenarios.presets import geodetic_to_ecef
+
+    rng = np.random.default_rng(seed)
+    out = []
+    for i in range(n):
+        loc = np.asarray(batteries[i % len(batteries)].location, float)
+        aim = loc + rng.normal(0, 1e3, size=3)
+        target = BallisticScenario(r0=aim, v0=np.array([0.0, 800.0, 0.0]))
+        tt = ThreatTrack(threat_id=i, target=target, aim_point=aim, priority=1.0)
+        out.append(tt)
+    return out
+
+
+class TestLayeredParallelAndMetrics:
+    def test_run_campaign_parallel_matches_serial(self):
+        # The parallel pairwise backend must fan out / gather identically to the
+        # serial loop without invoking the (expensive) 6-DOF integrator per
+        # pair. We stub ``run_engagement`` so the test validates the joblib
+        # merge logic in isolation and stays fast in CI.
+        import src.sim.api as api
+        from src.c2 import run_campaign, CampaignThreat
+        from src.scenarios.presets import build_interceptor_config
+        from src.guidance.law import GuidanceLaw
+
+        cfg, g = build_interceptor_config("arrow3")
+        glaw = GuidanceLaw(g)
+        bats = [Battery("A", cfg, glaw, location=np.zeros(3), magazine=10, salvo_size=1)]
+
+        # Deterministic per-pair stub so serial == parallel by construction.
+        def _stub(interceptor, guidance, target, scenario, n_trials, perturbations):
+            key = (id(target), id(bats[0]))
+            return type("E", (), {"miss_distance": float(hash(key)) % 100})()
+
+        saved = api.run_engagement
+        api.run_engagement = _stub
+        try:
+            from src.scenarios.target_factory import BallisticScenario
+            threats = [
+                CampaignThreat(
+                    target=BallisticScenario(r0=np.array([6.4e6, 0, 0]),
+                                          v0=np.array([0.0, 800.0, 0.0])),
+                    aim_point=np.zeros(3), priority=1.0, label=f"T{i}")
+                for i in range(4)
+            ]
+
+            def builder(th, bat):
+                from src.sim.api import EngagementScenario
+                return EngagementScenario(engagement_end=40.0)
+
+            ser = run_campaign(threats, bats, builder, n_trials=1, parallel=False)
+            par = run_campaign(threats, bats, builder, n_trials=1, parallel=True, n_jobs=2)
+        finally:
+            api.run_engagement = saved
+
+        # Same number of pairwise engagements, same doctrine outcome.
+        assert len(ser.engagements) == len(par.engagements) == 4
+        assert ser.battle.n_threats == par.battle.n_threats == 4
+        assert ser.battle.n_leakage == par.battle.n_leakage
+
+    def test_architecture_summary_rolls_up(self):
+        arch = build_architecture_from_locations(magazine_per_base=4, salvo_size=1)
+        summ = architecture_summary(arch)
+        assert summ["n_batteries"] == 7
+        assert summ["total_magazine"] == 28
+        assert summ["n_layers"] == 1  # all sites default to "upper" tier
+        assert summ["layers"][0]["total_magazine"] == 28
+
+    def test_national_metrics_aggregates(self):
+        np.random.seed(7)
+        arch = build_architecture_from_locations(magazine_per_base=6, salvo_size=1)
+        bats = arch.batteries
+        raid = _raid(12, bats, seed=7)
+        c2 = DistributedC2Config()
+        c2.space.bandwidth_tracks_per_s = 100.0
+        c2.space.p_detect = 1.0
+        c2.raid_arrival_window_s = 3.0
+
+        def assess(t, bi):
+            return 0.1
+
+        r = run_layered_campaign(raid, arch, assess, c2=c2)
+        m = national_metrics(r)
+        assert m["n_inbound"] == 12
+        assert m["n_defeated"] + m["n_leakage"] == 12
+        assert m["n_dropped_c2_saturation"] == 0
+        assert 0.0 <= m["mean_battery_utilization"] <= 1.0
+        assert m["shots_fired"] >= m["n_defeated"]
+
+    def test_national_metrics_saturation_drop(self):
+        np.random.seed(8)
+        arch = build_architecture_from_locations(magazine_per_base=6, salvo_size=1)
+        bats = arch.batteries
+        raid = _raid(20, bats, seed=8)
+        c2 = DistributedC2Config()
+        c2.space.bandwidth_tracks_per_s = 1.0
+        c2.space.p_detect = 1.0
+        c2.raid_arrival_window_s = 2.0
+
+        def assess(t, bi):
+            return 0.1
+
+        r = run_layered_campaign(raid, arch, assess, c2=c2)
+        m = national_metrics(r)
+        assert m["n_dropped_c2_saturation"] > 0
+        assert m["n_leakage"] == m["n_dropped_c2_saturation"] + m["n_cued_but_missed"]
+
+
+class TestNationalMap:
+    def test_build_national_scene(self):
+        arch = build_architecture_from_locations(magazine_per_base=4, salvo_size=1)
+        bats = arch.batteries
+        defended = [np.asarray(b.location, float) for b in bats[:3]]
+        threats = [np.asarray(b.location, float) + np.array([1e3, 0, 0]) for b in bats[:5]]
+        scene = build_national_scene(arch, defended_points=defended, threat_points=threats)
+        # MultiBlock with earth + base clouds + defended + threats.
+        assert "earth" in scene.keys()
+        assert "defended" in scene.keys()
+        assert "threats" in scene.keys()
+
+    def test_coverage_summary_table(self):
+        arch = build_architecture_from_locations(magazine_per_base=4, salvo_size=1)
+        rows = coverage_summary_table(arch)
+        assert len(rows) == len(arch.layers[0].tiers)
+        for row in rows:
+            assert row["total_magazine"] == row["n_bases"] * row["magazine_per_base"]
+

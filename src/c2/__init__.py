@@ -18,7 +18,11 @@ from .layers import (
     build_architecture_from_locations,
     distributed_handoff,
     run_layered_campaign,
+    architecture_summary,
+    national_metrics,
 )
+
+from .persistence import save_campaign_hdf5, load_campaign_hdf5
 
 __all__ = [
     "BattleManager",
@@ -41,4 +45,8 @@ __all__ = [
     "build_architecture_from_locations",
     "distributed_handoff",
     "run_layered_campaign",
+    "architecture_summary",
+    "national_metrics",
+    "save_campaign_hdf5",
+    "load_campaign_hdf5",
 ]

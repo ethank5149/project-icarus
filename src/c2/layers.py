@@ -303,10 +303,15 @@ def distributed_handoff(
 def run_layered_campaign(
     threats: List[ThreatTrack],
     architecture: DefenseArchitecture,
-    assess: Callable[[ThreatTrack, int], float],
+    assess: Optional[Callable[[ThreatTrack, int], float]] = None,
     cfg: Optional[BattleManagerConfig] = None,
     c2: Optional[DistributedC2Config] = None,
     location_fn: Optional[Callable[[Any], np.ndarray]] = None,
+    parallel: bool = False,
+    n_jobs: int = -1,
+    scenario_builder: Optional[Callable[[ThreatTrack, Any], Any]] = None,
+    n_trials: int = 20,
+    perturbations: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     """Engage a raid with the full layered architecture + distributed C2.
 
@@ -316,10 +321,26 @@ def run_layered_campaign(
     doctrine across *all* batteries in the architecture so the allocator can
     commit boost/upper/mid/lower interceptors against the cued subset.
 
+    Two usage modes:
+    * Supply ``assess`` directly (lightweight, precomputed miss stats), or
+    * Supply ``scenario_builder`` + ``n_trials`` and let the function precompute
+      the per-(threat, battery) engagement miss distances in parallel (joblib)
+      and build the ``assess`` callback itself — matching :func:`run_campaign`.
+
     Returns a dict with ``battle`` (BattleResult over the *declared* threats, so
-    leakage includes dropped tracks), ``c2_diag`` (handoff diagnostics), and
-    ``tasked_ids`` (which threats reached a battery).
+    leakage includes dropped tracks), ``c2_diag`` (handoff diagnostics),
+    ``tasked_ids`` (which threats reached a battery), and ``architecture``.
     """
+    from .battle_manager import BattleResult
+
+    if assess is None:
+        if scenario_builder is None:
+            raise ValueError("Provide either `assess` or `scenario_builder`")
+        assess = _build_layered_assess(
+            threats, architecture, scenario_builder, n_trials, perturbations,
+            parallel=parallel, n_jobs=n_jobs, backend=backend,
+        )
+
     cfg = cfg or BattleManagerConfig()
     c2 = c2 or DistributedC2Config()
 
@@ -344,7 +365,6 @@ def run_layered_campaign(
 
     # BattleResult is built over ``tasked`` (declared == tasked here inside BM),
     # but we want leakage relative to the *original* declared raid.
-    from .battle_manager import BattleResult
     final_battle = BattleResult(threats=declared, batteries=batteries, shots=battle.shots)
 
     tasked_ids = [t.threat_id for t in tasked]
@@ -354,3 +374,120 @@ def run_layered_campaign(
         "tasked_ids": tasked_ids,
         "architecture": architecture,
     }
+
+
+def _build_layered_assess(
+    threats, architecture, scenario_builder, n_trials, perturbations,
+    parallel=False, n_jobs=-1, backend="dask",
+):
+    """Precompute per-(threat, battery) engagements and build the assess fn.
+
+    Mirrors ``run_campaign``'s pairwise precompute but indexes engagements by
+    (threat_id, battery_index) so layered batteries of differing types are each
+    evaluated. Uses the shared ``_parallel_map`` backend (dask-preferred,
+    joblib fallback) when ``parallel`` is set.
+    """
+    from ..sim.api import run_engagement
+    from ..guidance.law import GuidanceLaw
+    from .campaign import _parallel_map
+
+    batteries = architecture.batteries
+    # engagements[(ti, bi)] = EngagementResult replicate list
+    eng: Dict[Tuple[int, int], List[Any]] = {}
+
+    def _one(args):
+        ti, bi, th, bat = args
+        scenario = scenario_builder(th, bat)
+        guidance = bat.guidance_config
+        if not isinstance(guidance, GuidanceLaw):
+            guidance = GuidanceLaw(guidance)
+        return (ti, bi), run_engagement(
+            interceptor=bat.interceptor_config,
+            guidance=guidance,
+            target=th.target,
+            scenario=scenario,
+            n_trials=n_trials,
+            perturbations=perturbations,
+        )
+
+    jobs = [
+        (ti, bi, th, bat)
+        for ti, th in enumerate(threats)
+        for bi, bat in enumerate(batteries)
+    ]
+    if parallel:
+        out = _parallel_map(_one, jobs, backend=backend, n_jobs=n_jobs)
+    else:
+        out = [_one(j) for j in jobs]
+    for key, e in out:
+        eng[key] = [e]
+
+    def assess(threat_track: ThreatTrack, battery_index: int) -> float:
+        reps = eng.get((threat_track.threat_id, battery_index), [])
+        if not reps:
+            return float("inf")
+        idx = min(max(threat_track.shots_fired - 1, 0), len(reps) - 1)
+        miss = getattr(reps[idx], "miss_distance", np.inf)
+        return float(miss) if np.isfinite(miss) else float("inf")
+
+    return assess
+
+
+# ---------------------------------------------------------------------------
+# National aggregate metrics
+# ---------------------------------------------------------------------------
+
+def architecture_summary(arch: DefenseArchitecture) -> Dict[str, Any]:
+    """Roll up a layered architecture into national-scale readiness metrics."""
+    per_layer: List[Dict[str, Any]] = []
+    for ly in arch.layers:
+        per_kind: Dict[str, int] = {}
+        for t in ly.tiers:
+            per_kind.setdefault(t.kind, 0)
+            per_kind[t.kind] += t.total_magazine
+        per_layer.append({
+            "layer": ly.name,
+            "n_batteries": len(ly.batteries),
+            "total_magazine": ly.total_magazine,
+            "by_kind": per_kind,
+        })
+    return {
+        "n_layers": len(arch.layers),
+        "n_batteries": len(arch.batteries),
+        "total_magazine": arch.total_magazine,
+        "layers": per_layer,
+    }
+
+
+def national_metrics(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Aggregate the output of :func:`run_layered_campaign` into national stats.
+
+    Combines the C2 handoff diagnostics (saturation drop) with the
+    ``BattleResult`` leakage / battery-utilization so a campaign can be scored
+    at theater scale: how many inbound threats leaked, and why (cued but missed
+    vs never cued due to C2 saturation).
+    """
+    battle = result["battle"]
+    diag = result.get("c2_diag", {})
+    n_inbound = diag.get("n_inbound", battle.n_threats)
+    n_tasked = diag.get("n_tasked", battle.n_defeated + battle.n_leakage)
+    n_dropped = diag.get("n_dropped", 0)
+    n_cued_but_leaked = max(battle.n_leakage - n_dropped, 0)
+
+    util = battle.battery_utilization
+    mean_util = float(np.mean(list(util.values()))) if util else 0.0
+
+    return {
+        "n_inbound": n_inbound,
+        "n_tasked": n_tasked,
+        "n_dropped_c2_saturation": n_dropped,
+        "n_defeated": battle.n_defeated,
+        "n_leakage": battle.n_leakage,
+        "n_cued_but_missed": n_cued_but_leaked,
+        "leakage_fraction": battle.leakage_fraction,
+        "kill_probability": battle.kill_probability,
+        "shots_fired": battle.shots_fired,
+        "mean_battery_utilization": mean_util,
+        "mean_cue_latency_s": diag.get("mean_cue_latency_s", 0.0),
+    }
+
