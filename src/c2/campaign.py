@@ -73,6 +73,44 @@ def _deserialize_scenario(spec: Dict[str, Any]):
                                for k, v in spec.items()})
 
 
+def _parallel_map(fn, jobs, backend: str = "joblib", n_jobs: int = -1):
+    """Fan ``jobs`` out across host cores via joblib multiprocessing.
+
+    ``backend`` accepts ``"joblib"`` (default, always available) or ``"dask"``.
+    dask-distributed's worker nanny is non-functional in some containers, so the
+    dask path collapses to joblib with a warning. ``fn`` must be picklable — the
+    campaign feeds it plain dict specs (no lambda configs cross the boundary).
+    """
+    try:
+        from joblib import Parallel, delayed
+    except ImportError as exc:  # pragma: no cover - joblib present
+        raise RuntimeError("joblib required for parallel campaigns") from exc
+    if backend == "dask":
+        try:
+            from distributed import Client
+            with Client(processes=True, n_workers=max(n_jobs, 1) if n_jobs and n_jobs > 0 else None) as client:
+                futures = client.map(fn, jobs)
+                return list(client.gather(futures))
+        except Exception:  # noqa: BLE001 - dask nanny often fails to spawn
+            import warnings
+            warnings.warn("dask distributed unavailable; falling back to joblib")
+    return Parallel(n_jobs=n_jobs, backend="multiprocessing")(delayed(fn)(j) for j in jobs)
+
+
+class _WrapEngagement:
+    """Minimal adapter exposing an engagement result dict as an object."""
+
+    def __init__(self, data: Dict[str, Any]):
+        self.miss_distance = data.get("miss_distance", float("inf"))
+        self.kill_assessment = data.get("kill_assessment", False)
+        self.monte_carlo = _WrapMonteCarlo(data.get("mc_misses", []))
+
+
+class _WrapMonteCarlo:
+    def __init__(self, misses):
+        self.miss_distances = list(misses)
+
+
 def _run_one_pair_spec(pair_spec: Dict[str, Any]):
     """Module-level worker (picklable): run one engagement from a JSON spec.
 
@@ -98,7 +136,7 @@ def _run_one_pair_spec(pair_spec: Dict[str, Any]):
         n_trials=pair_spec["n_trials"],
         perturbations=pair_spec.get("perturbations"),
     )
-    return ti, {
+    return pair_spec["ti"], pair_spec.get("bi", 0), {
         "miss_distance": float(getattr(eng, "miss_distance", np.inf)),
         "kill_assessment": bool(getattr(eng, "kill_assessment", False)),
         "mc_misses": [float(m) for m in
@@ -248,7 +286,6 @@ def run_campaign(
         # Parallel transport uses INDUSTRY-STANDARD formats: each pair is a
         # JSON SPEC (interceptor/guidance rebuilt by NAME; target/scenario
         # as plain params). No lambda thrust profiles cross the boundary.
-        from ..scenarios.presets import build_interceptor_config
         specs = []
         for ti, th in enumerate(threats):
             for bi, bat in enumerate(batteries):
@@ -261,13 +298,7 @@ def run_campaign(
                     "n_trials": n_trials,
                     "perturbations": perturbations,
                 })
-        try:
-            from joblib import Parallel, delayed
-        except ImportError as exc:  # pragma: no cover - joblib present
-            raise RuntimeError("joblib required for parallel run_campaign") from exc
-        results = Parallel(n_jobs=n_jobs, backend="multiprocessing")(
-            delayed(_run_one_pair_spec)(s) for s in specs
-        )
+        results = _parallel_map(_run_one_pair_spec, specs, backend=backend, n_jobs=n_jobs)
     else:
         # Serial: run the real run_engagement with the battery's own configs
         # (no name resolution, so custom/preset configs both work).
@@ -285,11 +316,16 @@ def run_campaign(
                     n_trials=n_trials,
                     perturbations=perturbations,
                 )
-                results.append((ti, eng))
+                results.append((ti, bi, eng))
 
     engagements_by_threat: Dict[int, List[Any]] = {i: [] for i in range(len(threats))}
     all_engagements: List[Any] = []
-    for ti, eng in results:
+    for ti, bi, eng in results:
+        # The parallel worker returns a plain dict; wrap it so the assess
+        # factory (which reads ``.miss_distance``) works uniformly with the
+        # serial path's EngagementResult objects.
+        if isinstance(eng, dict):
+            eng = _WrapEngagement(eng)
         engagements_by_threat[ti].append(eng)
         all_engagements.append(eng)
 

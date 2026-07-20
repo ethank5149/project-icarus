@@ -1,11 +1,11 @@
-"""Phase 6.4 — National "Golden Dome" visualization (PyVista).
+"""Phase 6.4 — National "Golden Dome" visualization (PyVista + Panel).
 
 Builds a 3-D ECEF coverage map of the defended architecture: interceptor
 bases (colored by tier kind), defended targets, and an optional raid of threat
-aim points. PyVista is the only viz dependency available in the environment
-(panel/dash are not installed), so this produces a static/gui-renderable scene
-rather than a live dashboard. The scene reuses ``reference/locations.yml`` as the
-single source of truth for site coordinates.
+aim points. :func:`build_national_scene` produces a PyVista
+``MultiBlock`` ready for ``plot()`` or offscreen export; ``dashboard.py`` wraps
+it in a live Panel app (``panel serve src/c2/dashboard.py``). The scene reuses
+``reference/locations.yml`` as the single source of truth for site coordinates.
 """
 
 from __future__ import annotations

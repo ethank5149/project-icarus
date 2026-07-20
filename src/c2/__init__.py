@@ -23,6 +23,8 @@ from .layers import (
 )
 
 from .persistence import save_campaign_hdf5, load_campaign_hdf5
+from .visualization import build_national_scene, coverage_summary_table
+from .dashboard import NationalDashboard, make_dashboard
 
 __all__ = [
     "BattleManager",
@@ -47,6 +49,11 @@ __all__ = [
     "run_layered_campaign",
     "architecture_summary",
     "national_metrics",
+
     "save_campaign_hdf5",
     "load_campaign_hdf5",
+    "build_national_scene",
+    "coverage_summary_table",
+    "NationalDashboard",
+    "make_dashboard",
 ]

@@ -314,3 +314,74 @@ class TestNationalMap:
         for row in rows:
             assert row["total_magazine"] == row["n_bases"] * row["magazine_per_base"]
 
+
+import pytest as _pytest
+
+_pytest.importorskip("panel")
+
+
+class TestDashboard:
+    def test_dashboard_synthetic_run(self):
+        from src.c2.dashboard import NationalDashboard
+        dash = NationalDashboard()
+        dash._do_reset()
+        assert dash._scene_png is not None  # offscreen PyVista PNG rendered
+        dash.n_threats = 12
+        dash.bandwidth = 2.0
+        dash._do_run()
+        m = dash._metrics
+        assert m["n_inbound"] == 12
+        assert m["n_tasked"] + m["n_dropped_c2_saturation"] == 12
+        assert dash._scene_png is not None
+        # metrics + coverage panes render without error
+        dash.metrics_pane()
+        dash.coverage_pane()
+        dash.scene_pane()
+        dash.view()
+
+
+class TestLayeredParallel:
+    def test_layered_assess_none_serial_matches_contract(self):
+        # The assess=None path must fan out via JSON specs and return metrics.
+        from src.c2.layers import run_layered_campaign
+        from src.c2.battle_manager import ThreatTrack, BattleManagerConfig
+        from src.scenarios.target_factory import BallisticScenario
+        from src.scenarios.scenario import EngagementScenario
+        import numpy as np
+
+        arch = build_architecture_from_locations(magazine_per_base=2)
+        # single-battery tiny arch for speed
+        from src.c2.layers import DefenseArchitecture, Layer, Tier
+        from reference.locations import locations_by_designation, coordinates_to_ecef
+        tiny = DefenseArchitecture(name="tiny").add(
+            Layer("upper_layer").add(Tier(kind="upper", interceptor_name="arrow3",
+                                          bases=[np.zeros(3)], magazine_per_base=2, label="arrow3")))
+
+        groups = locations_by_designation()
+        defended = coordinates_to_ecef(groups["defended-target"][0])
+        R_EARTH = 6.371e6
+
+        def _raid(n):
+            out = []
+            for i in range(n):
+                r0 = np.array([0.0, 0.0, R_EARTH + 1.0e5]) + np.array([i * 1e3, 0, 0])
+                v0 = 5000.0 * (np.asarray(defended, float) - r0)
+                v0 = v0 / np.linalg.norm(v0)
+                tc = BallisticScenario(r0=r0, v0=v0, metadata={"name": f"t{i}"})
+                out.append(ThreatTrack(target=tc, threat_id=i, aim_point=defended))
+            return out
+
+        raid = _raid(2)
+
+        def sb(track, battery):
+            return EngagementScenario(
+                interceptor_launch_site=np.asarray(battery.location, float),
+                target_launch_site=np.asarray(track.target.r0, float),
+                engagement_end=10.0)
+
+        res = run_layered_campaign(raid, tiny, scenario_builder=sb, n_trials=1,
+                                   cfg=BattleManagerConfig())
+        m = national_metrics(res)
+        assert m["n_inbound"] == 2
+        # Each raid element reaches a battery (no saturation at default bandwidth).
+        assert m["n_tasked"] == 2

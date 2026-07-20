@@ -120,7 +120,7 @@ class TestParallelTransport:
             "scenario": _serialize_scenario(EngagementScenario(engagement_end=18.0)),
             "n_trials": 1, "perturbations": None,
         }
-        ti, out = _run_one_pair_spec(pair)
+        ti, bi, out = _run_one_pair_spec(pair)
         assert ti == 0
         assert isinstance(out, dict)
         assert "miss_distance" in out and "mc_misses" in out

@@ -309,6 +309,7 @@ def run_layered_campaign(
     location_fn: Optional[Callable[[Any], np.ndarray]] = None,
     parallel: bool = False,
     n_jobs: int = -1,
+    backend: str = "joblib",
     scenario_builder: Optional[Callable[[ThreatTrack, Any], Any]] = None,
     n_trials: int = 20,
     perturbations: Optional[Dict[str, float]] = None,
@@ -324,8 +325,9 @@ def run_layered_campaign(
     Two usage modes:
     * Supply ``assess`` directly (lightweight, precomputed miss stats), or
     * Supply ``scenario_builder`` + ``n_trials`` and let the function precompute
-      the per-(threat, battery) engagement miss distances in parallel (joblib)
-      and build the ``assess`` callback itself — matching :func:`run_campaign`.
+      the per-(threat, battery) engagement miss distances (optionally ``parallel``
+      via ``backend`` = ``"joblib"`` or ``"dask"``) and build the ``assess``
+      callback itself — matching :func:`run_campaign`.
 
     Returns a dict with ``battle`` (BattleResult over the *declared* threats, so
     leakage includes dropped tracks), ``c2_diag`` (handoff diagnostics),
@@ -378,56 +380,60 @@ def run_layered_campaign(
 
 def _build_layered_assess(
     threats, architecture, scenario_builder, n_trials, perturbations,
-    parallel=False, n_jobs=-1, backend="dask",
+    parallel=False, n_jobs=-1, backend="joblib",
 ):
     """Precompute per-(threat, battery) engagements and build the assess fn.
 
     Mirrors ``run_campaign``'s pairwise precompute but indexes engagements by
     (threat_id, battery_index) so layered batteries of differing types are each
-    evaluated. Uses the shared ``_parallel_map`` backend (dask-preferred,
-    joblib fallback) when ``parallel`` is set.
+    evaluated. Transport is the *same* industry-standard JSON-spec + plain-dict
+    path used by ``run_campaign``: interceptors/guidance are rebuilt by NAME and
+    target/scenario serialized to plain params, so no lambda-thrust-profile
+    config ever crosses the process boundary. When ``parallel`` is set the specs
+    fan out across host cores via ``_parallel_map`` (joblib multiprocessing).
     """
-    from ..sim.api import run_engagement
-    from ..guidance.law import GuidanceLaw
-    from .campaign import _parallel_map
+    from .campaign import (
+        _interceptor_name,
+        _serialize_target,
+        _serialize_scenario,
+        _run_one_pair_spec,
+        _parallel_map,
+    )
 
     batteries = architecture.batteries
-    # engagements[(ti, bi)] = EngagementResult replicate list
-    eng: Dict[Tuple[int, int], List[Any]] = {}
+    # eng[(ti, bi)] = dict {miss_distance, kill_assessment, mc_misses}
+    eng: Dict[Tuple[int, int], List[Dict[str, Any]]] = {}
 
-    def _one(args):
-        ti, bi, th, bat = args
-        scenario = scenario_builder(th, bat)
-        guidance = bat.guidance_config
-        if not isinstance(guidance, GuidanceLaw):
-            guidance = GuidanceLaw(guidance)
-        return (ti, bi), run_engagement(
-            interceptor=bat.interceptor_config,
-            guidance=guidance,
-            target=th.target,
-            scenario=scenario,
-            n_trials=n_trials,
-            perturbations=perturbations,
-        )
+    specs = []
+    for ti, th in enumerate(threats):
+        for bi, bat in enumerate(batteries):
+            specs.append({
+                "ti": ti,
+                "bi": bi,
+                "interceptor_name": _interceptor_name(bat),
+                "target": _serialize_target(th.target),
+                "scenario": _serialize_scenario(scenario_builder(th, bat)),
+                "n_trials": n_trials,
+                "perturbations": perturbations,
+            })
 
-    jobs = [
-        (ti, bi, th, bat)
-        for ti, th in enumerate(threats)
-        for bi, bat in enumerate(batteries)
-    ]
     if parallel:
-        out = _parallel_map(_one, jobs, backend=backend, n_jobs=n_jobs)
+        out = _parallel_map(_run_one_pair_spec, specs, backend=backend, n_jobs=n_jobs)
     else:
-        out = [_one(j) for j in jobs]
-    for key, e in out:
-        eng[key] = [e]
+        out = [_run_one_pair_spec(s) for s in specs]
+
+    for ti, bi, edict in out:
+        eng.setdefault((ti, bi), []).append(edict)
+        # Fallback for multi-shot salvo: replicate the single engagement so
+        # shoot-look-shoot can consume additional interceptors against it.
+        eng[(ti, bi)].append(edict)
 
     def assess(threat_track: ThreatTrack, battery_index: int) -> float:
         reps = eng.get((threat_track.threat_id, battery_index), [])
         if not reps:
             return float("inf")
         idx = min(max(threat_track.shots_fired - 1, 0), len(reps) - 1)
-        miss = getattr(reps[idx], "miss_distance", np.inf)
+        miss = reps[idx].get("miss_distance", np.inf)
         return float(miss) if np.isfinite(miss) else float("inf")
 
     return assess

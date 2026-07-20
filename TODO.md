@@ -1,3 +1,4 @@
 - Rename src/ to project-icarus/ and update imports accordingly to maintain python package structure
 - Add extensive report generation capabilities and ability to audit every component at every stage (through logging or the like)
 - Expand interceptor and target missile libraries with accurate geometries, aerodynamics, and performance characteristics
+- Add Patriot and THAAD interceptor system capabilities (with deployed coords and alt.)
