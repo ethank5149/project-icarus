@@ -3,10 +3,30 @@ import openmdao.api as om
 import dymos as dm
 from .phases.boost_phase import BoostODE
 from .phases.midcourse_phase import MidcourseODE
-from .phases.terminal_phase import TerminalODE
+from .phases.terminal_phase import TerminalODE, ClosedLoopTerminalODE
 
 
-def build_trajectory_problem(interceptor=None, guidance=None):
+def build_trajectory_problem(interceptor=None, guidance=None, closed_loop=True):
+    """Assemble a multi-phase Dymos trajectory optimization problem.
+
+    Uses the modern Dymos 1.15 API: a :class:`dm.Trajectory` holding three
+    Radau (Lagrange-ps) phases (boost, midcourse, terminal) linked by state
+    continuity. Each phase ODE wraps the shared ``EOM6DOF`` + blended-aero
+    surrogate (``boundary_alt`` is fixed via the ODE option).
+
+    Terminal phase
+    --------------
+    * ``closed_loop=True`` (default) wires the ``EngagementRunner``'s closed-loop
+      seeker guidance into the terminal ODE (:class:`ClosedLoopTerminalODE`): the
+      interceptor acceleration is computed each node by ``TerminalGuidance`` from
+      the relative kinematics, and the optimizer tunes the guidance gains
+      (``N``, ``accel_limit``) to directly minimize the final miss distance. This
+      is the Phase-7 step "wire EngagementRunner into the Dymos terminal phase as
+      the closed-loop ODE so the optimizer directly minimizes miss distance of a
+      seeker-guided solution".
+    * ``closed_loop=False`` keeps the original open-loop ``accel`` controls and
+      minimizes time-to-intercept with a final-position equality constraint.
+    """
     """Assemble a multi-phase Dymos trajectory optimization problem.
 
     Uses the modern Dymos 1.15 API: a :class:`dm.Trajectory` holding three
@@ -83,28 +103,64 @@ def build_trajectory_problem(interceptor=None, guidance=None):
                           fix_initial=True, fix_final=True, val=0.0)
 
     # --- Terminal phase ----------------------------------------------------
-    terminal = dm.Phase(ode_class=TerminalODE, transcription=tx)
-    traj.add_phase("terminal", terminal)
-    terminal.set_time_options(fix_initial=False, duration_bounds=(10.0, 60.0), units="s")
-    terminal.add_state("r", rate_source="dr_dt", units="m", shape=(3,),
-                       fix_initial=False, fix_final=True,
-                       val=np.array([300e3, 0.0, 6471e3]))
-    terminal.add_state("v", rate_source="dv_dt", units="m/s", shape=(3,),
-                       fix_initial=False, fix_final=False,
-                       val=np.array([-500.0, 0.0, -500.0]))
-    terminal.add_state("q", rate_source="dq_dt", units=None, shape=(4,),
-                       fix_initial=False, fix_final=False,
-                       val=np.array([1.0, 0.0, 0.0, 0.0]))
-    terminal.add_state("omega", rate_source="domega_dt", units="rad/s", shape=(3,),
-                       fix_initial=False, fix_final=False, val=np.zeros(3))
-    terminal.add_state("m", rate_source="dm_dt", units="kg",
-                       fix_initial=False, fix_final=False, val=200.0)
-    terminal.add_control("accel_x", units="m/s**2", opt=True, lower=-150.0, upper=150.0,
-                         fix_initial=True, fix_final=True, val=0.0)
-    terminal.add_control("accel_y", units="m/s**2", opt=True, lower=-150.0, upper=150.0,
-                         fix_initial=True, fix_final=True, val=0.0)
-    terminal.add_control("accel_z", units="m/s**2", opt=True, lower=-150.0, upper=150.0,
-                         fix_initial=True, fix_final=True, val=0.0)
+    law = getattr(getattr(guidance, "terminal", None), "law", "pn") if guidance else "pn"
+    if closed_loop:
+        terminal = dm.Phase(ode_class=ClosedLoopTerminalODE, transcription=tx)
+        traj.add_phase("terminal", terminal)
+        terminal.options["ode_init_kwargs"] = {"law": law}
+        terminal.set_time_options(fix_initial=False, duration_bounds=(10.0, 60.0), units="s")
+        # Closed-loop: the final interceptor position is LEFT FREE so the
+        # optimizer (tuning N / accel_limit + phase durations) can drive the
+        # seeker-guided solution onto the defended aim point; the objective is
+        # the final miss distance directly.
+        terminal.add_state("r", rate_source="dr_dt", units="m", shape=(3,),
+                           fix_initial=False, fix_final=False,
+                           val=np.array([120e3, 0.0, 6471e3]))
+        terminal.add_state("v", rate_source="dv_dt", units="m/s", shape=(3,),
+                           fix_initial=False, fix_final=False,
+                           val=np.array([-1500.0, 0.0, 0.0]))
+        terminal.add_state("q", rate_source="dq_dt", units=None, shape=(4,),
+                           fix_initial=False, fix_final=False,
+                           val=np.array([1.0, 0.0, 0.0, 0.0]))
+        terminal.add_state("omega", rate_source="domega_dt", units="rad/s", shape=(3,),
+                           fix_initial=False, fix_final=False, val=np.zeros(3))
+        terminal.add_state("m", rate_source="dm_dt", units="kg",
+                           fix_initial=False, fix_final=False, val=200.0)
+        # Optional open-loop bias retained for differentiability (left at 0).
+        terminal.add_control("accel_x", units="m/s**2", opt=True, lower=-20.0, upper=20.0,
+                             fix_initial=True, fix_final=True, val=0.0)
+        terminal.add_control("accel_y", units="m/s**2", opt=True, lower=-20.0, upper=20.0,
+                             fix_initial=True, fix_final=True, val=0.0)
+        terminal.add_control("accel_z", units="m/s**2", opt=True, lower=-20.0, upper=20.0,
+                             fix_initial=True, fix_final=True, val=0.0)
+        # Guidance gains the optimizer tunes to null the miss distance.
+        terminal.add_parameter("N", units=None, val=4.0, opt=True,
+                               lower=2.0, upper=8.0)
+        terminal.add_parameter("accel_limit", units="m/s**2", val=150.0, opt=True,
+                               lower=50.0, upper=250.0)
+    else:
+        terminal = dm.Phase(ode_class=TerminalODE, transcription=tx)
+        traj.add_phase("terminal", terminal)
+        terminal.set_time_options(fix_initial=False, duration_bounds=(10.0, 60.0), units="s")
+        terminal.add_state("r", rate_source="dr_dt", units="m", shape=(3,),
+                           fix_initial=False, fix_final=True,
+                           val=np.array([300e3, 0.0, 6471e3]))
+        terminal.add_state("v", rate_source="dv_dt", units="m/s", shape=(3,),
+                           fix_initial=False, fix_final=False,
+                           val=np.array([-500.0, 0.0, -500.0]))
+        terminal.add_state("q", rate_source="dq_dt", units=None, shape=(4,),
+                           fix_initial=False, fix_final=False,
+                           val=np.array([1.0, 0.0, 0.0, 0.0]))
+        terminal.add_state("omega", rate_source="domega_dt", units="rad/s", shape=(3,),
+                           fix_initial=False, fix_final=False, val=np.zeros(3))
+        terminal.add_state("m", rate_source="dm_dt", units="kg",
+                           fix_initial=False, fix_final=False, val=200.0)
+        terminal.add_control("accel_x", units="m/s**2", opt=True, lower=-150.0, upper=150.0,
+                             fix_initial=True, fix_final=True, val=0.0)
+        terminal.add_control("accel_y", units="m/s**2", opt=True, lower=-150.0, upper=150.0,
+                             fix_initial=True, fix_final=True, val=0.0)
+        terminal.add_control("accel_z", units="m/s**2", opt=True, lower=-150.0, upper=150.0,
+                             fix_initial=True, fix_final=True, val=0.0)
     # Aim point (defended location) held fixed across the terminal phase nodes.
     terminal.add_parameter("target_r", units="m", shape=(3,), val=np.array([100e3, 0.0, 6471e3]),
                            opt=False)
@@ -116,20 +172,21 @@ def build_trajectory_problem(interceptor=None, guidance=None):
     traj.link_phases(phases=["midcourse", "terminal"],
                      vars=["r", "v", "q", "omega", "m", "time"])
 
-    # Terminal-phase objective: minimize time-to-intercept (t_duration) while
-    # driving the final interceptor position onto the defended aim point. The
-    # miss distance is reported as a timeseries for assessment; the hard
-    # kill-criterion is enforced by the final-position boundary constraint
-    # below, which is gradient-connected through the ``r`` state.
     terminal.add_timeseries_output("miss_distance")
-    terminal.add_objective("time_phase", scaler=1.0, loc="final")
-    # Drive the interceptor onto the defended aim point at intercept; this is the
-    # planner's miss-distance kill-criterion expressed as a final-position
-    # equality constraint (gradient-connected through the terminal r-state).
-    terminal.add_boundary_constraint(
-        "r", loc="final", units="m", shape=(3,),
-        equals=np.array([100e3, 0.0, 6471e3]),
-    )
+    if closed_loop:
+        # Closed-loop: the optimizer directly minimizes the final miss distance
+        # of the seeker-guided terminal solution (no final-position constraint
+        # needed — the guidance drives r onto target_r by construction).
+        terminal.add_objective("miss_distance", scaler=1.0, loc="final")
+    else:
+        # Terminal-phase objective: minimize time-to-intercept (t_duration)
+        # while driving the final interceptor position onto the defended aim
+        # point; the miss distance is reported as a timeseries for assessment.
+        terminal.add_objective("time_phase", scaler=1.0, loc="final")
+        terminal.add_boundary_constraint(
+            "r", loc="final", units="m", shape=(3,),
+            equals=np.array([100e3, 0.0, 6471e3]),
+        )
 
     p.driver = om.ScipyOptimizeDriver(optimizer="SLSQP")
     p.driver.declare_coloring()

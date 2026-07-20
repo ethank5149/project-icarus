@@ -10,14 +10,16 @@ from src.optimization.trajectory_optimization import build_trajectory_problem
 @pytest.fixture
 def problem():
     warnings.filterwarnings("ignore")
-    p = build_trajectory_problem()
+    # Original open-loop formulation (time/position objective); the closed-loop
+    # guidance variant is covered in test_terminal_guidance_opt.py.
+    p = build_trajectory_problem(closed_loop=False)
     p.setup()
     return p
 
 
 class TestDymosTrajectory:
     def test_problem_setup(self):
-        p = build_trajectory_problem()
+        p = build_trajectory_problem(closed_loop=False)
         assert p is not None
 
     def test_assembles_and_runs(self, problem):
