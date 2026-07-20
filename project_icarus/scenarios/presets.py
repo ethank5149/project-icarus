@@ -11,6 +11,7 @@ from .target_factory import (
     SuppressedScenario,
     SwarmScenario,
     DecoyThreatScenario,
+    CruiseMissileScenario,
     MU_EARTH,
     R_EARTH,
 )
@@ -481,6 +482,29 @@ _register(
     HGVScenario.from_params(max_alt_km=60.0, lateral_range_km=800.0, speed_mach=8.0),
     EngagementScenario(engagement_end=400.0),
     "Maneuvering HGV, 60 km max alt, Mach 8",
+)
+
+# --- Cruise missile family ---
+
+_register(
+    "cruise_short_range",
+    CruiseMissileScenario.from_params(launch_alt_km=0.0, range_km=300.0, speed_mach=0.8),
+    EngagementScenario(engagement_end=300.0),
+    "Short-range cruise missile, 100 m terrain-following alt, Mach 0.8",
+)
+
+_register(
+    "cruise_medium_range",
+    CruiseMissileScenario.from_params(launch_alt_km=0.0, range_km=800.0, speed_mach=0.85),
+    EngagementScenario(engagement_end=500.0),
+    "Medium-range cruise missile, Mach 0.85, 800 km range",
+)
+
+_register(
+    "cruise_sea_launched",
+    CruiseMissileScenario.from_params(launch_alt_km=0.0, range_km=500.0, speed_mach=0.8),
+    EngagementScenario(engagement_end=400.0),
+    "Sea-launched cruise missile, 100 m terrain-following",
 )
 
 # --- Suppressed / evasive family ---

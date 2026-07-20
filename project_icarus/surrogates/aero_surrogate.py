@@ -60,7 +60,7 @@ class AeroSurrogateComponent(ExplicitComponent):
             inputs["altitude"][0],
             inputs["delta"][0],
         ]])
-        J = self.gpr.jacobian_fd(X)  # (1, n_coeff, n_features)
+        J = self.gpr.analytical_jacobian(X)  # (1, n_coeff, n_features)
         for j, cname in enumerate(COEFF_NAMES):
             for i, fname in enumerate(FEAT):
                 partials[cname, fname] = J[0, j, i]

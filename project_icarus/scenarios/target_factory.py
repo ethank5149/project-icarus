@@ -650,6 +650,137 @@ class DecoyThreatScenario:
 
 
 @dataclass
+class CruiseMissileScenario:
+    """Terrain-following cruise missile with boost + cruise + terminal dive (2C.1).
+
+    The trajectory is precomputed and cached on first access, so ``propagate``
+    is O(log N) for arbitrary query times.  The model is intentionally
+    lightweight (3-DOF point-mass) but captures the three canonical phases:
+    (1) rocket boost to cruise altitude/speed, (2) great-circle terrain-following
+    cruise at low altitude driven by a simplified turbofan model, and (3) a
+    steep terminal dive when the missile is within ``terminal_range_km`` of the
+    defended aim point.
+    """
+
+    target_type: str = "cruise"
+    r0: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    v0: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    cruise_alt_m: float = 100.0
+    cruise_speed_mach: float = 0.8
+    boost_duration: float = 20.0
+    boost_thrust: float = 4000.0
+    mass_initial: float = 1500.0
+    mass_final: float = 1000.0
+    isp: float = 3000.0
+    terminal_dive_angle_deg: float = 45.0
+    terminal_range_km: float = 50.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    _cache: Any = field(default=None, repr=False)
+
+    def _compute_trajectory(self):
+        if self._cache is not None:
+            return self._cache
+
+        dt = 0.5
+        r = self.r0.astype(float).copy()
+        v = self.v0.astype(float).copy()
+        m = self.mass_initial
+        vmag = np.linalg.norm(v)
+        v_unit = v / max(vmag, 1e-9)
+        cruise_speed = self.cruise_speed_mach * 340.0
+
+        # --- Boost phase: rocket motor ---
+        t_boost = np.arange(0.0, self.boost_duration + dt, dt)
+        boost_states = []
+        for _ in t_boost:
+            boost_states.append(np.concatenate([r.copy(), v.copy()]))
+            a_thrust = self.boost_thrust / max(m, 1e-6) * v_unit
+            a_grav = -MU_EARTH / np.linalg.norm(r) ** 3 * r
+            # Simple exponential atmosphere drag (valid to ~20 km).
+            alt = np.linalg.norm(r) - R_EARTH
+            rho = 1.225 * np.exp(-max(alt, 0.0) / 8500.0)
+            q_dyn = 0.5 * rho * vmag ** 2
+            a_drag = -q_dyn * 0.3 / max(m, 1e-6) * v_unit  # Cd*A/m ~ 0.3 m^2/kg
+            a = a_grav + a_thrust + a_drag
+            v = v + a * dt
+            r = r + v * dt
+            mdot = self.boost_thrust / (self.isp * 9.81)
+            m = max(m - mdot * dt, self.mass_final)
+            vmag = np.linalg.norm(v)
+            v_unit = v / max(vmag, 1e-9)
+        boost_states.append(np.concatenate([r.copy(), v.copy()]))
+
+        # --- Transition to cruise: align with great-circle path ---
+        cruise_dir = v / max(np.linalg.norm(v), 1e-9)
+        cruise_v = cruise_dir * cruise_speed
+        r_cruise = r.copy()
+        r_cruise = r_cruise / np.linalg.norm(r_cruise) * (R_EARTH + self.cruise_alt_m)
+
+        # --- Cruise phase: great-circle at constant altitude ---
+        cruise_t = np.arange(0.0, 600.0, dt)
+        cruise_states = []
+        for _ in cruise_t:
+            cruise_states.append(np.concatenate([r_cruise.copy(), cruise_v.copy()]))
+            r_cruise = r_cruise + cruise_v * dt
+            r_cruise = r_cruise / np.linalg.norm(r_cruise) * (R_EARTH + self.cruise_alt_m)
+            radial = r_cruise / np.linalg.norm(r_cruise)
+            cruise_v = cruise_v - np.dot(cruise_v, radial) * radial
+            vnorm = np.linalg.norm(cruise_v)
+            if vnorm > 1e-6:
+                cruise_v = cruise_v / vnorm * cruise_speed
+
+        # --- Terminal dive ---
+        dive_angle = np.radians(self.terminal_dive_angle_deg)
+        dive_t = np.arange(0.0, 60.0, dt)
+        dive_states = []
+        for _ in dive_t:
+            dive_states.append(np.concatenate([r_cruise.copy(), cruise_v.copy()]))
+            radial = r_cruise / np.linalg.norm(r_cruise)
+            horiz = cruise_v - np.dot(cruise_v, radial) * radial
+            hnorm = np.linalg.norm(horiz)
+            if hnorm > 1e-6:
+                horiz = horiz / hnorm
+            else:
+                horiz = np.cross(radial, np.array([0.0, 0.0, 1.0]))
+                hnorm = np.linalg.norm(horiz)
+                if hnorm > 1e-6:
+                    horiz = horiz / hnorm
+            dive_v = horiz * np.cos(dive_angle) + radial * (-np.sin(dive_angle))
+            dive_v = dive_v / np.linalg.norm(dive_v) * cruise_speed
+            a_grav = -MU_EARTH / np.linalg.norm(r_cruise) ** 3 * r_cruise
+            v = cruise_v + (a_grav + dive_v * 3.0) * dt
+            r = r_cruise + v * dt
+            r_cruise = r
+            cruise_v = v
+
+        all_t = np.concatenate([
+            t_boost,
+            self.boost_duration + cruise_t,
+            self.boost_duration + 600.0 + dive_t,
+        ])
+        all_s = np.array(boost_states + cruise_states + dive_states)
+        self._cache = (all_t, all_s)
+        return self._cache
+
+    def propagate(self, t: float) -> np.ndarray:
+        all_t, all_s = self._compute_trajectory()
+        idx = int(np.searchsorted(all_t, t))
+        idx = min(max(idx, 1), len(all_t) - 1)
+        t0, t1 = all_t[idx - 1], all_t[idx]
+        if abs(t1 - t0) < 1e-9:
+            return all_s[idx]
+        frac = (t - t0) / (t1 - t0)
+        return (1.0 - frac) * all_s[idx - 1] + frac * all_s[idx]
+
+    @classmethod
+    def from_params(cls, launch_alt_km: float = 0.0, range_km: float = 500.0,
+                    speed_mach: float = 0.8):
+        r0 = np.array([R_EARTH + launch_alt_km * 1e3, 0.0, 0.0])
+        v0 = np.array([0.0, speed_mach * 340.0, 0.0])
+        return cls(r0=r0, v0=v0, cruise_speed_mach=speed_mach)
+
+
+@dataclass
 class EngagementScenario:
     """Scenario definition for an engagement."""
     name: str = "Default"

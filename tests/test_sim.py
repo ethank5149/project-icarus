@@ -7,6 +7,7 @@ from project_icarus.scenarios.target_factory import (
     SuppressedScenario,
     SwarmScenario,
     DecoyThreatScenario,
+    CruiseMissileScenario,
     GuidedThreatConfig,
     simulate_guided_threat,
     MU_EARTH,
@@ -83,6 +84,24 @@ class TestSwarmScenario:
         states = tgt.payload_states(10.0)
         assert len(states) == 3
         assert all(s.shape == (6,) for s in states)
+
+
+class TestCruiseMissileScenario:
+    def test_propagate(self):
+        tgt = CruiseMissileScenario.from_params(launch_alt_km=0.0, range_km=500.0, speed_mach=0.8)
+        state = tgt.propagate(10.0)
+        assert state.shape == (6,)
+
+    def test_cruise_altitude(self):
+        tgt = CruiseMissileScenario.from_params(launch_alt_km=0.0, range_km=500.0, speed_mach=0.8)
+        state = tgt.propagate(50.0)
+        alt = np.linalg.norm(state[:3]) - R_EARTH
+        assert 80.0 < alt < 150.0
+
+    def test_from_params(self):
+        tgt = CruiseMissileScenario.from_params(launch_alt_km=0.0, range_km=500.0, speed_mach=0.8)
+        assert tgt.target_type == "cruise"
+        assert tgt.cruise_alt_m == 100.0
 
 
 class TestEngagementScenario:

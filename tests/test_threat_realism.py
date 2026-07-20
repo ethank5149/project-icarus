@@ -4,6 +4,7 @@ import pytest
 from project_icarus.scenarios.target_factory import (
     BallisticScenario,
     DecoyThreatScenario,
+    CruiseMissileScenario,
     ThreatSignatureLibrary,
 )
 from project_icarus.targets.decoy_model import DecoyModel
@@ -112,3 +113,20 @@ class TestGuidanceDiscriminator:
         )
         assert np.isfinite(res.miss_distance)
         assert gl._decoy_rejects >= 0
+
+
+class TestCruiseMissileScenario:
+    def test_propagate_shape(self):
+        tgt = CruiseMissileScenario.from_params(launch_alt_km=0.0, range_km=500.0)
+        state = tgt.propagate(30.0)
+        assert state.shape == (6,)
+
+    def test_engagement_runs(self):
+        tgt = CruiseMissileScenario.from_params(launch_alt_km=0.0, range_km=300.0)
+        cfg, g = build_interceptor_config("tamir")
+        gl = GuidanceLaw(config=g)
+        res = run_engagement(
+            cfg, gl, tgt,
+            EngagementScenario(engagement_end=200.0), n_trials=2,
+        )
+        assert np.isfinite(res.miss_distance)

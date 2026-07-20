@@ -7,6 +7,7 @@ from project_icarus.aero.aero_analytical import (
     blended_aero,
 )
 from project_icarus.surrogates.uncertainty import UncertaintyPropagator
+from project_icarus.surrogates.train_gpr import MultiOutputGPR, build_kernel
 
 
 class TestAeroAnalytical:
@@ -54,3 +55,34 @@ class TestUncertaintyPropagator:
             return float(cd + cy + cm)
         indices = up.elementary_effects(np.zeros(3), 0.1, 0.1, 0.1, eom)
         assert np.isclose(sum(indices), 1.0)
+
+
+class TestMultiOutputGPRJacobian:
+    def test_analytical_jacobian_matches_fd(self):
+        rng = np.random.default_rng(0)
+        X = rng.uniform(0, 5, size=(40, 5))
+        y = rng.uniform(0, 1, size=(40, 5))
+        model = MultiOutputGPR()
+        model.fit(X, y)
+
+        x_test = rng.uniform(0, 5, size=(4, 5))
+        J_ana = model.analytical_jacobian(x_test)
+
+        eps = 1e-6
+        J_fd = np.zeros((4, 5, 5))
+        for j in range(5):
+            xp = x_test.copy(); xp[:, j] += eps
+            xm = x_test.copy(); xm[:, j] -= eps
+            J_fd[:, :, j] = (model.predict(xp) - model.predict(xm)) / (2.0 * eps)
+
+        assert np.allclose(J_ana, J_fd, atol=1e-5)
+
+    def test_analytical_jacobian_shape(self):
+        rng = np.random.default_rng(1)
+        X = rng.uniform(0, 5, size=(30, 5))
+        y = rng.uniform(0, 1, size=(30, 5))
+        model = MultiOutputGPR()
+        model.fit(X, y)
+        x_test = rng.uniform(0, 5, size=(5, 5))
+        J = model.analytical_jacobian(x_test)
+        assert J.shape == (5, 5, 5)
