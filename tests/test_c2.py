@@ -10,10 +10,13 @@ from src.c2 import (
     hungarian_allocate,
     run_campaign,
     CampaignThreat,
+    run_discrete_event,
+    C2Scenario,
 )
 from src.interceptors.config import InterceptorConfig, GuidanceConfig
 from src.scenarios.target_factory import BallisticScenario, R_EARTH
 from src.scenarios.scenario import EngagementScenario
+from src.sensors.sensor import SensorNetwork, Track
 
 
 def _interceptor():
@@ -162,3 +165,113 @@ class TestCampaign:
         assert 0.0 <= s["leakage_fraction"] <= 1.0
         assert s["n_threats"] == 3
         assert s["shots_fired"] >= 3
+
+
+class TestC2TrackDriven:
+    def _make_track(self, pos, tid=1, hits=3):
+        trk = Track(track_id=tid, x=np.concatenate([np.asarray(pos, dtype=float), np.zeros(3)]),
+                    P=np.diag([1e6, 1e6, 1e6, 1e4, 1e4, 1e4]), last_t=0.0)
+        trk.hits = hits
+        return trk
+
+    def test_run_with_tracks_engages_confirmed(self):
+        # Declared threat at aim point; a confirmed track near it is engaged.
+        aim = np.array([R_EARTH, 0.0, 0.0])
+        threats = [ThreatTrack(threat_id=0, target=None, aim_point=aim, priority=1.0)]
+        bats = [_battery("A", magazine=5, salvo=1)]
+
+        track = self._make_track(aim + np.array([1e3, 0.0, 0.0]), tid=1, hits=3)
+        bm = BattleManager(threats, bats, cfg=BattleManagerConfig(
+            doctrine="shoot_look_shoot", allocator="greedy", salvo_size=1, max_rounds=2))
+
+        def assess(track_arg, bi):
+            return 0.1  # kill
+
+        res = bm.run_with_tracks([track], assess)
+        assert res.n_defeated == 1
+        assert res.shots_fired == 1
+
+    def test_confirmation_required_gate_drops_unconfirmed(self):
+        # A track with fewer hits than confirmation_required is ignored.
+        aim = np.array([R_EARTH, 0.0, 0.0])
+        threats = [ThreatTrack(threat_id=0, target=None, aim_point=aim, priority=1.0)]
+        bats = [_battery("A", magazine=5, salvo=1)]
+        unconfirmed = self._make_track(aim, tid=1, hits=1)
+        bm = BattleManager(threats, bats, cfg=BattleManagerConfig(
+            confirmation_required=2, salvo_size=1, max_rounds=1))
+
+        def assess(track_arg, bi):
+            return 0.1
+
+        res = bm.run_with_tracks([unconfirmed], assess)
+        assert res.shots_fired == 0
+        assert res.n_leakage == 1
+
+    def test_c2_latency_delays_engagement(self):
+        # With C2 latency longer than the scenario span, no shots are fired.
+        from src.sensors.sensor import Sensor
+        from src.dynamics.coordinate_systems import geodetic_to_ecef
+
+        def _ecef(a, b, c=0):
+            return np.asarray(geodetic_to_ecef(a, b, c), dtype=float)
+
+        sensor = Sensor("S", lat_deg=45.0, lon_deg=-90.0, max_range_m=5000e3)
+        rng = np.random.default_rng(3)
+        net = SensorNetwork([sensor], confirmation_hits=1, use_clutter=False, rng=rng)
+
+        aim = _ecef(45.0, -90.0) + np.array([0.0, 0.0, 600e3])
+        threats = [ThreatTrack(threat_id=0, target=None, aim_point=aim, priority=1.0)]
+        bats = [_battery("A", magazine=5, salvo=1, loc=aim)]
+        bm = BattleManager(threats, bats, cfg=BattleManagerConfig(
+            c2_latency_s=100.0, salvo_size=1, max_rounds=1))
+
+        scenario = C2Scenario(name="lat", t_start=0.0, t_end=10.0, dt=1.0)
+
+        def truth(t):
+            return [aim]
+
+        def assess(track_arg, bi):
+            return 0.1
+
+        out = run_discrete_event(scenario, net, bm, truth, assess, rcs_m2=1.0)
+        assert out["battle"].shots_fired == 0  # latency gate blocks all shots
+
+
+class TestDiscreteEvent:
+    def test_discrete_event_drives_engagement(self):
+        # Build a 1-sensor network tracking a single moving target; the C2 loop
+        # should confirm the track and fire at least one interceptor.
+        from src.sensors.sensor import Sensor
+        from src.dynamics.coordinate_systems import geodetic_to_ecef
+
+        def _ecef(a, b, c=0):
+            return np.asarray(geodetic_to_ecef(a, b, c), dtype=float)
+
+        sensor = Sensor("S", lat_deg=45.0, lon_deg=-90.0, max_range_m=5000e3,
+                        range_std_m=300.0, angle_std_deg=0.2)
+        rng = np.random.default_rng(3)
+        net = SensorNetwork([sensor], confirmation_hits=2, use_clutter=False, rng=rng)
+
+        aim = _ecef(45.0, -90.0) + np.array([0.0, 0.0, 600e3])
+        threats = [ThreatTrack(threat_id=0, target=None, aim_point=aim, priority=1.0)]
+        bats = [_battery("A", magazine=6, salvo=1, loc=aim)]
+
+        bm = BattleManager(threats, bats, cfg=BattleManagerConfig(
+            doctrine="shoot_look_shoot", allocator="greedy", salvo_size=1,
+            max_rounds=3, c2_latency_s=1.0))
+
+        scenario = C2Scenario(name="de", t_start=0.0, t_end=10.0, dt=1.0)
+
+        def truth(t):
+            # Slow, realistic midcourse drift.
+            return [_ecef(45.0, -90.0) + np.array([0.0, 0.0, 600e3]) + t * np.array([1e3, 0.0, -200.0])]
+
+        def assess(track_arg, bi):
+            return 0.1  # always kill
+
+        out = run_discrete_event(scenario, net, bm, truth, assess, rcs_m2=1.0)
+        # At least one interceptor was committed across the scenario.
+        assert len(out["shots"]) >= 1
+        # The declared threat was defeated (defeat propagates across scans).
+        assert out["battle"].n_defeated >= 1
+        assert len(out["n_confirmed"]) == 11  # 11 scans (0..10 inclusive)

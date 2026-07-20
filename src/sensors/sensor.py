@@ -19,8 +19,14 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
 import numpy as np
+from scipy.stats import norm
 
 from src.dynamics.coordinate_systems import ecef_to_geodetic, geodetic_to_ecef
+
+
+def _confidence(sigma: float) -> float:
+    """Two-sided confidence for ``sigma`` gaussian sigmas (e.g. 3 -> 0.9973)."""
+    return float(2.0 * norm.cdf(abs(sigma)) - 1.0)
 
 
 @dataclass
@@ -55,6 +61,11 @@ class Sensor:
     range_std_m: float = 500.0
     angle_std_deg: float = 0.3
     p_fa: float = 1e-6
+    # False-alarm / clutter: average number of spurious (clutter) detections
+    # generated per scan across the sensor's field of regard. Independent of the
+    # real-target Pd; used by ``emit_clutter`` to populate a track table with
+    # noise so M-of-N confirmation can reject them.
+    clutter_rate: float = 0.0
 
     @property
     def ecef(self) -> np.ndarray:
@@ -148,6 +159,42 @@ class Sensor:
             angle_std_rad=a_std,
         )
 
+    def emit_clutter(
+        self, t: float, rng: np.random.Generator, n_max: int = 50
+    ) -> List["Detection"]:
+        """Generate Poisson-distributed spurious (clutter) detections.
+
+        Samples ``k ~ Poisson(clutter_rate)`` false detections uniformly over the
+        sensor's visible hemisphere (elevation in ``[min_elevation_deg, 89]`` deg,
+        azimuth in ``[0, 360)``) at random slant ranges within ``max_range_m``.
+        These have no associated truth and exist so the fusion layer + M-of-N
+        confirmation can reject them. Returns an empty list when
+        ``clutter_rate <= 0``.
+        """
+        out: List["Detection"] = []
+        if self.clutter_rate <= 0.0:
+            return out
+        k = int(rng.poisson(self.clutter_rate))
+        k = min(k, n_max)
+        a_std = np.radians(self.angle_std_deg)
+        for _ in range(k):
+            az = rng.uniform(0.0, 360.0)
+            el = rng.uniform(self.min_elevation_deg, 89.0)
+            r = rng.uniform(0.1 * self.max_range_m, self.max_range_m)
+            out.append(
+                Detection(
+                    sensor_name=self.name,
+                    sensor_ecef=self.ecef.copy(),
+                    t=t,
+                    range_m=r,
+                    azimuth_deg=az,
+                    elevation_deg=el,
+                    range_std_m=self.range_std_m,
+                    angle_std_rad=a_std,
+                )
+            )
+        return out
+
 
 @dataclass
 class Detection:
@@ -198,6 +245,10 @@ class Track:
     last_t: float
     hits: int = 1
     misses: int = 0
+    # Time of the last *measurement update* (not predict). Used by the
+    # network's association gate to inflate position uncertainty by the
+    # unobserved velocity over the dead-reckoning interval.
+    last_update_t: float = 0.0
 
     # Process noise (m^2/s^3 position, m^2/s velocity) - light constant-velocity.
     q_pos: float = 1e2
@@ -266,6 +317,7 @@ class Track:
         self.x = self.x + K @ y
         self.P = (np.eye(6) - K @ H) @ self.P
         self.hits += 1
+        self.last_update_t = det.t
 
     @property
     def position(self) -> np.ndarray:
@@ -278,6 +330,10 @@ class Track:
     @property
     def pos_cov(self) -> np.ndarray:
         return self.P[:3, :3]
+
+    @property
+    def vel_cov(self) -> np.ndarray:
+        return self.P[3:, 3:]
 
 
 class SensorNetwork:
@@ -293,15 +349,30 @@ class SensorNetwork:
         sensors: Sequence[Sensor],
         association_gate_sigma: float = 3.0,
         drop_after_misses: int = 3,
+        confirmation_hits: int = 2,
+        use_clutter: bool = True,
         rng: Optional[np.random.Generator] = None,
     ):
         self.sensors = list(sensors)
         self.gate = association_gate_sigma
         self.drop_after = drop_after_misses
+        # M-of-N confirmation: a track is "confirmed" only after it has been
+        # updated by detections on at least ``confirmation_hits`` distinct scans.
+        self.confirmation_hits = max(1, int(confirmation_hits))
+        self.use_clutter = use_clutter
         self._rng = rng or np.random.default_rng()
         self.tracks: List[Track] = []
         self._next_id = 1
         self.all_detections: List[Detection] = []
+        # Track the last scan index each track was updated on (for M-of-N).
+        self._track_last_scan: Dict[int, int] = {}
+        self._scan_index: int = 0
+        # Kinematic-consistency gate: max allowed speed discrepancy (m/s)
+        # between a track's estimated velocity and a detection's implied
+        # velocity before the detection is rejected as non-associated. Set high
+        # enough to admit realistic maneuver (a few km/s) while rejecting
+        # clutter (random jumps imply absurd speeds).
+        self._max_dv: float = 4000.0
 
     def scan(
         self,
@@ -310,6 +381,7 @@ class SensorNetwork:
         t: float = 0.0,
     ) -> List[Detection]:
         """Collect detections across all sites for the given target states."""
+        self._scan_index += 1
         dets: List[Detection] = []
         for tgt in targets:
             for s in self.sensors:
@@ -317,41 +389,102 @@ class SensorNetwork:
                 if d is not None:
                     dets.append(d)
                     self.all_detections.append(d)
+        if self.use_clutter:
+            for s in self.sensors:
+                for cd in s.emit_clutter(t, self._rng):
+                    dets.append(cd)
+                    self.all_detections.append(cd)
         self._fuse(dets, t)
         return dets
 
     def _fuse(self, dets: List[Detection], t: float):
+        # Predict every track forward to the scan time.
         for trk in self.tracks:
             trk.predict(t)
+        # Chi-square gate for association (3-DOF position innovation).
+        from scipy.stats import chi2
+        gate_chi2 = float(chi2.ppf(min(0.9999, 1.0 - 2 * (1.0 - _confidence(self.gate))), 3))
+
+        updated_ids = set()
         for d in dets:
+            z = d.estimated_ecef()
             cand = None
             best = np.inf
             for trk in self.tracks:
-                res = np.linalg.norm(d.estimated_ecef() - trk.position)
-                if res < best:
-                    best = res
+                # Innovation Mahalanobis distance. The gate covariance must
+                # account for the *unobserved* velocity: with a single passive
+                # sensor, velocity is weakly observable, so the EKF can drift the
+                # track position between scans. We inflate the position
+                # covariance by the velocity uncertainty projected over the time
+                # since the last update (dt^2 * Pvel) so track-while-scan
+                # association does not spuriously drop real detections.
+                dz = z - trk.position
+                dt_since = max(0.0, t - trk.last_update_t)
+                # Velocity is only weakly observable from a single passive
+                # sensor, so the EKF easily over-collapses the velocity
+                # covariance and drifts the track. Floor the gating velocity
+                # uncertainty at a physically-honest "essentially unknown"
+                # level so real detections (a few tens of km off due to the
+                # unobserved velocity) still associate, while spatially-distant
+                # clutter does not.
+                vel_floor = np.eye(3) * 1e8
+                Ppos = (trk.pos_cov + (dt_since ** 2) * (trk.vel_cov + vel_floor)
+                        + np.diag([trk.q_pos, trk.q_pos, trk.q_pos]))
+                try:
+                    dinv = np.linalg.inv(Ppos)
+                except np.linalg.LinAlgError:
+                    dinv = np.diag(1.0 / np.diag(Ppos))
+                d2 = float(dz @ dinv @ dz)
+                if d2 >= gate_chi2:
+                    continue
+                # Kinematic-consistency gate: a real track moves along a roughly
+                # constant velocity, whereas clutter detections are independent
+                # random points. Once a track has a velocity estimate, reject
+                # detections whose implied velocity (from the last update to this
+                # detection) disagrees with the track velocity by more than
+                # ``self._max_dv``. This is what ultimately suppresses persistent
+                # clutter that happens to fall inside the positional gate.
+                if trk.hits >= 2 and dt_since > 1e-6:
+                    implied_v = dz / dt_since
+                    dv = float(np.linalg.norm(implied_v - trk.velocity))
+                    if dv > self._max_dv:
+                        continue
+                if d2 < best:
+                    best = d2
                     cand = trk
-            if cand is not None and best < self.gate * 1e6:
+            if cand is not None:
                 cand.update(d)
+                updated_ids.add(cand.track_id)
+                # M-of-N confirmation: count distinct scans with a hit.
+                if self._track_last_scan.get(cand.track_id, -1) != self._scan_index:
+                    cand.hits += 1
+                    self._track_last_scan[cand.track_id] = self._scan_index
             else:
-                self.tracks.append(
-                    Track(
-                        track_id=self._next_id,
-                        x=np.concatenate([d.estimated_ecef(), np.zeros(3)]),
-                        P=np.diag([1e6, 1e6, 1e6, 1e4, 1e4, 1e4]),
-                        last_t=t,
-                    )
+                new = Track(
+                    track_id=self._next_id,
+                    # Initialise velocity as zero; the EKF will learn it.
+                    x=np.concatenate([d.estimated_ecef(), np.zeros(3)]),
+                    P=np.diag([1e6, 1e6, 1e6, 1e4, 1e4, 1e4]),
+                    last_t=t,
+                    last_update_t=t,
                 )
+                self.tracks.append(new)
+                self._track_last_scan[new.track_id] = self._scan_index
                 self._next_id += 1
         # Age tracks that received no detection this scan.
-        if dets:
-            for trk in list(self.tracks):
+        for trk in list(self.tracks):
+            if trk.track_id in updated_ids:
+                trk.misses = 0
+            else:
                 trk.misses += 1
                 if trk.misses > self.drop_after:
                     self.tracks.remove(trk)
+                    self._track_last_scan.pop(trk.track_id, None)
 
-    def confirmed_tracks(self, min_hits: int = 2) -> List[Track]:
-        return [t for t in self.tracks if t.hits >= min_hits]
+    def confirmed_tracks(self, min_hits: Optional[int] = None) -> List[Track]:
+        """Tracks confirmed by the M-of-N rule (``confirmation_hits`` scans)."""
+        n = self.confirmation_hits if min_hits is None else max(1, int(min_hits))
+        return [t for t in self.tracks if t.hits >= n]
 
     def coverage_mask(
         self,

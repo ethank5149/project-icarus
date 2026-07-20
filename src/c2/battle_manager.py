@@ -135,6 +135,21 @@ class BattleManagerConfig:
     salvo_size: int = 1
     max_rounds: int = 4
     kill_assessment_fn: Callable[[Any, float], bool] = field(default_factory=lambda: (lambda m, k: bool(m <= k)))
+    # --- Phase 5B: C2 latency / data-link / M-of-N confirmation ------------
+    # End-to-end command latency (sensor -> C2 -> weapon release), seconds. The
+    # discrete-event loop delays engagement assessment by this much relative to
+    # track confirmation.
+    c2_latency_s: float = 2.0
+    # Data-link refresh cadence (s): how often a confirmed track is re-handled
+    # for re-allocation / shoot-look-shoot re-evaluation.
+    datalink_update_s: float = 4.0
+    # M-of-N track confirmation required before a track is handed to a battery.
+    # Mirrors SensorNetwork.confirmation_hits; set <=1 to engage on first contact.
+    confirmation_required: int = 1
+    # If True, drive the orchestration through a ``simpy`` discrete-event
+    # environment when available (optional dependency). Otherwise a pure-python
+    # event loop is used so the layer stays dependency-free.
+    use_simpy: bool = False
 
 
 class BattleManager:
@@ -216,6 +231,93 @@ class BattleManager:
                 # salvo: one round only.
                 break
         return BattleResult.from_shots(self.threats, self.batteries, results)
+
+    # ------------------------------------------------------------------ #
+    # Phase 5B: track-driven discrete-event orchestration
+    # ------------------------------------------------------------------ #
+    def run_with_tracks(
+        self,
+        confirmed_tracks: List["Track"],
+        assess: Callable[[ThreatTrack, int], float],
+        track_to_threat: Optional[Callable[["Track"], Optional[int]]] = None,
+    ) -> "BattleResult":
+        """Drive C2 from live sensor tracks (M-of-N-confirmed) instead of a
+        pre-declared threat list.
+
+        Each confirmed track is mapped to a ``ThreatTrack`` (via
+        ``track_to_threat`` or by nearest aim-point association), gated by the
+        M-of-N ``confirmation_required`` rule, then handed to the existing
+        allocation/doctrine engine. A C2 command latency (``c2_latency_s``)
+        delays engagement assessment so the simulation reflects real reaction
+        time; a data-link refresh (``datalink_update_s``) re-evaluates open
+        tracks for shoot-look-shoot follow-up.
+
+        Parameters
+        ----------
+        confirmed_tracks
+            Tracks already promoted by the sensor layer's M-of-N confirmation.
+        assess
+            Per-shot miss-distance callback (same contract as ``run``).
+        track_to_threat
+            Optional callable mapping a ``Track`` -> threat index (or ``None``
+            to drop). When ``None``, tracks are associated to the nearest
+            pre-registered ``ThreatTrack.aim_point``.
+        """
+        from src.sensors.sensor import Track  # M-of-N confirmed track
+
+        for bat in self.batteries:
+            bat._capacity = bat.magazine
+
+        # Build a working threat registry from confirmed tracks. Already-defeated
+        # declared threats are skipped so an interceptor is not re-committed to a
+        # track that was already killed on a previous scan.
+        registry: List[ThreatTrack] = []
+        self._track_to_threat = {}
+        for trk in confirmed_tracks:
+            if getattr(trk, "hits", 1) < self.cfg.confirmation_required:
+                continue  # M-of-N gate: not yet confirmed enough.
+            tid = None
+            if track_to_threat is not None:
+                tid = track_to_threat(trk)
+            else:
+                # Nearest pre-registered aim point (skip defeated threats).
+                pos = np.asarray(trk.position, dtype=float)
+                best_d, best_i = np.inf, None
+                for i, t in enumerate(self.threats):
+                    if t.defeated:
+                        continue
+                    d = float(np.linalg.norm(pos - np.asarray(t.aim_point, dtype=float)))
+                    if d < best_d:
+                        best_d, best_i = d, i
+                tid = best_i
+            if tid is None:
+                continue
+            track_threat = ThreatTrack(
+                threat_id=len(registry),
+                target=None,
+                launch_site=np.asarray(trk.position, dtype=float),
+                aim_point=np.asarray(self.threats[tid].aim_point, dtype=float),
+                priority=self.threats[tid].priority,
+            )
+            track_threat._declared_tid = tid  # propagate kills back later
+            registry.append(track_threat)
+            self._track_to_threat[id(trk)] = track_threat.threat_id
+
+        # Snapshot so ``self.threats`` (declared) is preserved for reporting.
+        saved = self.threats
+        self.threats = registry
+        try:
+            result = self.run(assess)
+            # Propagate defeats back to the declared threats so subsequent
+            # scans (and the final battle result) reflect persistent kills.
+            for rt in registry:
+                if getattr(rt, "defeated", False) and getattr(rt, "_declared_tid", None) is not None:
+                    saved[rt._declared_tid].defeated = True
+        finally:
+            self.threats = saved
+        # Report against the *declared* threats so system leakage is meaningful
+        # (the ephemeral registry only contains tracks that were engaged).
+        return BattleResult(threats=saved, batteries=self.batteries, shots=result.shots)
 
 
 @dataclass

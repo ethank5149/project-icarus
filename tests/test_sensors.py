@@ -116,9 +116,10 @@ def test_network_fuses_multi_sensor_into_one_track():
     rng = np.random.default_rng(7)
     net = SensorNetwork(sensors, rng=rng)
     # Target over central CONUS at midcourse altitude: visible to multiple UEWR
-    # sites (Beale, Cape Cod, Clear, Fylingdales) at once.
+    # sites (Beale, Cape Cod, Clear, Fylingdales) at once. Realistic ~7 km/s
+    # midcourse motion (~7 km per 1 s scan).
     pos0 = _ecef(45.0, -90.0) + np.array([0.0, 0.0, 700e3])
-    path = [pos0 + k * np.array([120e3, 25e3, -20e3]) for k in range(8)]
+    path = [pos0 + k * np.array([7e3, 1.5e3, -1.2e3]) for k in range(8)]
     assert any(s.visible(path[0]) for s in sensors)
     for k, tgt in enumerate(path):
         net.scan([tgt], rcs_m2=1.0, t=float(k))
@@ -144,3 +145,68 @@ def test_load_radar_sites_have_long_range():
     sensors = load_sensors_from_locations(designation=["sensor"])
     assert all(s.max_range_m >= 4000e3 for s in sensors)
     assert any("LRDR" in str(s.name) or "Thule" in str(s.name) for s in sensors)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 5B: clutter / false-alarm + M-of-N confirmation
+# --------------------------------------------------------------------------- #
+def test_clutter_rate_zero_gives_no_clutter():
+    s = Sensor("S", lat_deg=40.0, lon_deg=-100.0, clutter_rate=0.0)
+    rng = np.random.default_rng(0)
+    assert s.emit_clutter(0.0, rng) == []
+
+
+def test_clutter_generates_spurious_detections():
+    s = Sensor("S", lat_deg=40.0, lon_deg=-100.0, clutter_rate=5.0,
+               min_elevation_deg=3.0, max_range_m=2000e3)
+    rng = np.random.default_rng(1)
+    out = s.emit_clutter(0.0, rng)
+    assert len(out) >= 1
+    assert all(d.sensor_name == "S" for d in out)
+    # Clutter should sit above the earth mask.
+    for d in out:
+        assert s.elevation_deg(d.estimated_ecef()) >= s.min_elevation_deg
+
+
+def test_mon_confirmation_rejects_single_scan():
+    """A track confirmed on one scan must NOT pass M-of-N=2 until a 2nd scan."""
+    sensors = load_sensors_from_locations(designation=["sensor"])
+    rng = np.random.default_rng(5)
+    net = SensorNetwork(sensors, confirmation_hits=2, use_clutter=False, rng=rng)
+    pos0 = _ecef(45.0, -90.0) + np.array([0.0, 0.0, 700e3])
+    # One scan only -> at most 1 confirmation scan.
+    net.scan([pos0], rcs_m2=1.0, t=0.0)
+    assert len(net.confirmed_tracks(min_hits=2)) == 0
+    # A second scan on the same target promotes it to confirmed.
+    net.scan([pos0], rcs_m2=1.0, t=1.0)
+    assert len(net.confirmed_tracks(min_hits=2)) >= 1
+
+
+def test_mon_confirmation_rejects_clutter():
+    """M-of-N confirmation rejects clutter while keeping a real target.
+
+    A real moving target is fed together with per-scan clutter. The M-of-N
+    rule must promote a track near the true target, and must NOT promote any
+    confirmed track that is far from the target (spatially-random clutter
+    cannot chain the required consecutive associations within the gate).
+    """
+    sensors = load_sensors_from_locations(designation=["sensor"])
+    for s in sensors:
+        s.clutter_rate = 2.0
+    rng = np.random.default_rng(12)
+    net = SensorNetwork(sensors, confirmation_hits=3, use_clutter=True, rng=rng)
+    # Real target over CONUS midcourse, visible to multiple UEWR sites.
+    pos0 = _ecef(45.0, -90.0) + np.array([0.0, 0.0, 700e3])
+    path = [pos0 + k * np.array([7e3, 1.5e3, -1.2e3]) for k in range(8)]
+    for k, tgt in enumerate(path):
+        net.scan([tgt], rcs_m2=1.0, t=float(k))
+    confirmed = net.confirmed_tracks(min_hits=3)
+    # The true target is confirmed.
+    near = [t for t in confirmed
+            if np.linalg.norm(t.position - path[-1]) < 5e5]
+    assert len(near) >= 1
+    # No confirmed track sits far (>= 2500 km) from the true target: clutter
+    # is rejected by the M-of-N rule.
+    far = [t for t in confirmed
+           if np.linalg.norm(t.position - path[-1]) >= 2500e3]
+    assert len(far) == 0
