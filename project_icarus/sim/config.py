@@ -22,8 +22,20 @@ class SimConfig:
     rtol: float = 1e-6
     atol: float = 1e-9
     max_step: float = 0.5
+    # Integrator backend selector (Phase 3.3). "rk45" is the historical explicit
+    # Runge-Kutta; "dop853" uses scipy's adaptive 8th-order Dormand-Prince for
+    # stiff/hypersonic endo phases. Both share the same event-driven RHS.
+    integrator: str = "rk45"
     # Hard safety cap on integration time (seconds) even if no event fires.
     t_max: float = 1800.0
+
+    # --- Numerical safeguards (Phase 3.4) ---
+    # Minimum allowable vehicle mass (kg); the RHS clamps mass above this floor so
+    # a (near) dry stage cannot drive 1/mass to infinity and stiffen the EOM.
+    mass_floor: float = 1e-3
+    # When True, Monte-Carlo trials producing non-finite (NaN/Inf) miss distances
+    # are rejected and logged rather than silently polluting kill statistics.
+    reject_nonfinite: bool = True
 
     # --- Event-driven phase transitions ---
     # Boost -> midcourse when thrust drops below this fraction of peak OR mass

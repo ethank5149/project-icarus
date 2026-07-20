@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Callable
 import numpy as np
-from scipy.integrate import RK45
+from scipy.integrate import RK45, solve_ivp
 
 from ..dynamics.eom_6dof import EOM6DOF
 from ..guidance.boost_guidance import BoostGuidance
@@ -157,12 +157,19 @@ class MonteCarloResult:
     mean_miss: float = 0.0
     std_miss: float = 0.0
     kill_probability: float = 0.0
+    n_rejected: int = 0
 
     def __post_init__(self):
-        if self.miss_distances:
-            self.mean_miss = float(np.mean(self.miss_distances))
-            self.std_miss = float(np.std(self.miss_distances))
-            self.kill_probability = float(np.mean(self.kill_assessments))
+        finite = [m for m in self.miss_distances if np.isfinite(m)]
+        self.n_rejected = len(self.miss_distances) - len(finite)
+        if finite:
+            self.mean_miss = float(np.mean(finite))
+            self.std_miss = float(np.std(finite))
+            kills_finite = [
+                k for m, k in zip(self.miss_distances, self.kill_assessments)
+                if np.isfinite(m)
+            ]
+            self.kill_probability = float(np.mean(kills_finite)) if kills_finite else 0.0
 
 
 @dataclass
@@ -254,35 +261,37 @@ def _surrogate(mach, alpha, beta, alt):
     return blended_aero(mach, alpha, beta, alt)[:3]
 
 
-def _current_phase(t, y, phase_events, ctx):
-    """Evaluate which phase is active given the registered transition events.
+def _phase_stateless(t, y, phase_events, ctx):
+    """Stateless phase determination (Phase 3.3 / hardening).
 
-    Only ONE monotonic transition boost -> midcourse -> terminal is permitted.
-    Boost can leave for midcourse (thrust cutoff); midcourse can leave for
-    terminal (reentry / range / speed). Terminal is terminal. This prevents a
-    launch at sub-terminal speed from spuriously jumping straight to terminal
-    guidance (which would command huge accelerations on a coasting body).
+    The active phase is derived purely from the registered events evaluated at
+    ``(t, y)`` rather than from mutable module-level state. The only allowed
+    transition order is boost -> midcourse -> terminal, so the phase is simply:
+    boost until a boost->midcourse event fires, then midcourse until a
+    midcourse->terminal event fires, then terminal. This keeps the RHS safe
+    under adaptive integrators (``solve_ivp``/DOP853) that evaluate ``f`` at
+    arbitrary points out of time order.
     """
-    current = ctx.get("phase", "boost")
-    if current == "terminal":
-        return "terminal"
-    for ev in phase_events:
-        if ev.next_phase == current:
-            continue  # a same-phase event is not a transition
-        if current == "boost" and ev.next_phase != "midcourse":
-            continue  # boost must go to midcourse first
-        if ev.should_trigger(t, y, ctx):
-            logger.debug("phase transition %s -> %s at t=%.2f", current, ev.next_phase, t)
-            return ev.next_phase
-    return current
+    to_midcourse = any(
+        ev.next_phase == "midcourse" and ev.should_trigger(t, y, ctx)
+        for ev in phase_events
+    )
+    if not to_midcourse:
+        return "boost"
+    to_terminal = any(
+        ev.next_phase == "terminal" and ev.should_trigger(t, y, ctx)
+        for ev in phase_events
+    )
+    return "terminal" if to_terminal else "midcourse"
 
 
-def _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom, thrust_fn, peak_thrust):
+def _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom, thrust_fn,
+                     peak_thrust, phase_events, mass_floor=1e-3):
     r = y[:3]
     v = y[3:6]
     q = y[6:10]
     omega = y[10:13]
-    m = y[13]
+    m = max(float(y[13]), mass_floor)  # Phase 3.4 mass floor (prevents 1/m blowup)
     q = q / max(np.linalg.norm(q), 1e-12)
 
     target_state = target_fn(t)
@@ -291,16 +300,14 @@ def _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom, thrust_fn,
 
     alt = np.linalg.norm(r) - 6371e3
 
-    # Event-driven phase determination (no time-based switch).
+    # Stateless event-driven phase determination (no time-based switch).
     ctx = {
-        "phase": getattr(_closed_loop_rhs, "_phase", "boost"),
         "thrust": float(thrust_fn(t, {"m": m})) if thrust_fn is not None else 0.0,
         "peak_thrust": peak_thrust,
         "dry_mass": getattr(eom, "dry_mass", -1.0),
         "target_state": target_state,
     }
-    phase = _current_phase(t, y, _closed_loop_rhs._events, ctx)
-    _closed_loop_rhs._phase = phase
+    phase = _phase_stateless(t, y, phase_events, ctx)
 
     rho = 1.225 * np.exp(-max(alt, 0.0) / 8500.0) if alt < 100e3 else 0.0
 
@@ -364,6 +371,88 @@ def _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom, thrust_fn,
     return np.concatenate([dr_dt, dv_dt, dq_dt, domega_dt, [dm_dt]])
 
 
+def _track_phase(t_grid, y_grid, phase_events, peak_thrust, thrust_fn, eom, mass_floor):
+    """Forward-pass phase tracker over a saved trajectory (monotonic).
+
+    Used by the DOP853 path to recover the phase at each saved point so the
+    separation/MKV impulses can be injected in the correct phase (Phase 1A.3).
+    """
+    phase = "boost"
+    out = []
+    for t, y in zip(t_grid, y_grid.T):
+        m = max(float(y[13]), mass_floor)
+        ctx = {
+            "thrust": float(thrust_fn(t, {"m": m})) if thrust_fn is not None else 0.0,
+            "peak_thrust": peak_thrust,
+            "dry_mass": getattr(eom, "dry_mass", -1.0),
+            "target_state": None,
+        }
+        if phase == "boost":
+            if any(ev.next_phase == "midcourse" and ev.should_trigger(t, y, ctx)
+                   for ev in phase_events):
+                phase = "midcourse"
+        elif phase == "midcourse":
+            if any(ev.next_phase == "terminal" and ev.should_trigger(t, y, ctx)
+                   for ev in phase_events):
+                phase = "terminal"
+        out.append(phase)
+    return out
+
+
+def _apply_separations(times, states, separations, separation_events, stage_thrust_model,
+                       eom, mkv, cfg, peak_thrust, thrust_fn, mass_floor):
+    """Inject stage-separation + MKV impulses into a saved (time, state) grid.
+
+    Shared by both integrator backends. Because separations are impulsive
+    (instantaneous mass drop + delta-v that persist for the rest of flight), the
+    corrections are *accumulated* and applied to the entire post-separation
+    trajectory, not just the single grid point where burnout is detected. This
+    matches what the RK45 stepper does by re-injecting ``integrator.y``.
+
+    Returns ``(times, states, final_phase)``.
+    """
+    orig = states.copy()
+    phase_by_idx = _track_phase(times, states, separation_events, peak_thrust,
+                                thrust_fn, eom, mass_floor) if (separations or mkv) else ["boost"] * len(times)
+    applied = set()
+    cum_dv = np.zeros(3)        # cumulative velocity delta-v (inertial, m/s)
+    cum_domega = np.zeros(3)    # cumulative spin impulse / mass
+    cum_dm = 0.0                # cumulative mass drop (kg)
+    mkv_done = False
+    for k in range(len(times)):
+        t = times[k]
+        y = orig[:, k].copy()
+        thrust_now = float(thrust_fn(t, {"m": y[13]})) if thrust_fn is not None else 0.0
+        sep_ctx = {"thrust": thrust_now, "peak_thrust": peak_thrust}
+        for i, sep in enumerate(separations):
+            if i in applied:
+                continue
+            if (separation_events and separation_events[i].should_trigger(t, orig[:, k], sep_ctx)):
+                applied.add(i)
+                m_now = max(y[13] - cum_dm, mass_floor)
+                cum_dm += sep.mass_drop
+                cum_dv += sep.impulse / max(m_now, 1e-6)
+                if getattr(sep, "spin_impulse", None) is not None:
+                    cum_domega += np.asarray(sep.spin_impulse) / max(m_now, 1e-6)
+                if stage_thrust_model is not None:
+                    inert = stage_thrust_model.inertia_after_separation(i)
+                    if inert is not None:
+                        cg = stage_thrust_model.cg_after_separation(i)
+                        eom.set_inertia(inert, cg)
+        # Multi-KV payload separation at terminal phase (1A.3).
+        if (mkv is not None and not mkv_done and phase_by_idx[k] == "terminal"):
+            mkv_done = True
+            m_now = max(y[13] - cum_dm, mass_floor)
+            cum_dm += mkv.kv_mass
+            cum_dv += mkv.v_rel * np.array([1.0, 0.0, 0.0])
+        # Overlay the accumulated impulsive corrections on the integrated state.
+        y[13] = max(y[13] - cum_dm, mass_floor)
+        y[3:6] = y[3:6] + cum_dv
+        y[10:13] = y[10:13] + cum_domega
+        states[:, k] = y
+    return times, states, phase_by_idx[-1] if phase_by_idx else "boost"
+
+
 def _integrate_trajectory(interceptor, guidance_law, target, scenario, perturb=None,
                           cfg: Optional[SimConfig] = None, rng=None):
     cfg = cfg or get_config()
@@ -399,28 +488,23 @@ def _integrate_trajectory(interceptor, guidance_law, target, scenario, perturb=N
     thrust_fn = getattr(interceptor, "_thrust_callable", None)
     peak_thrust = float(getattr(interceptor, "peak_thrust", 0.0) or 0.0)
 
-    # Keep the multi-stage model object so the loop can recompute bus inertia/CG
-    # after each separation (Phase 1B.2). The property rebuilds a fresh model,
-    # which is fine since separation state is keyed by index, not mutated here.
     stage_thrust_model = None
     if getattr(interceptor, "stages", None):
         stage_thrust_model = MultiStageThrustModel(interceptor.stages, interceptor.sep_impulses)
 
-    # Collect separation / MKV events to inject mid-integration.
     separations = getattr(interceptor, "_separations", []) or []
-
-    # Optional multi-KV (MKVSystem) separation at terminal, if the vehicle
-    # declares an MKV payload mass (1A.3).
     mkv = getattr(interceptor, "_mkv", None)
 
-    # Event-driven stage separations (Phase 1A.3): one SeparationEvent per stage,
-    # fired on physical burnout rather than a hard-coded time.
     separation_events = [
         SeparationEvent(i, stage_thrust_model, cfg)
         for i in range(len(separations))
     ] if stage_thrust_model is not None else []
 
+    phase_events = _default_events(cfg)
+    mass_floor = cfg.mass_floor
+
     t_span = [scenario.engagement_start, scenario.engagement_end]
+    t_end = min(t_span[1], cfg.t_max)
     target_fn = lambda t: target.propagate(t)
 
     # Expose the target scenario so the terminal seeker can run RV/decoy
@@ -428,75 +512,89 @@ def _integrate_trajectory(interceptor, guidance_law, target, scenario, perturb=N
     guidance_law._target_scenario = target
     guidance_law._decoy_rejects = 0
 
-    # Reset event-driven phase state on the RHS function object.
-    _closed_loop_rhs._phase = "boost"
-    _closed_loop_rhs._events = _default_events(cfg)
+    def _make_rhs():
+        return lambda t, y: _closed_loop_rhs(
+            t, y, interceptor, guidance_law, target_fn, eom,
+            thrust_fn, peak_thrust, phase_events, mass_floor,
+        )
 
-    integrator = RK45(
-        lambda t, y: _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom,
-                                      thrust_fn, peak_thrust),
-        t_span[0], state0, min(t_span[1], cfg.t_max),
-        max_step=cfg.max_step, rtol=cfg.rtol, atol=cfg.atol,
-    )
+    if cfg.integrator == "dop853":
+        # Phase 3.3: adaptive 8th-order Dormand-Prince for stiff/hypersonic endo.
+        sol = solve_ivp(
+            _make_rhs(), (t_span[0], t_end), state0, method="DOP853",
+            rtol=cfg.rtol, atol=cfg.atol, max_step=cfg.max_step,
+            dense_output=False,
+            t_eval=np.linspace(t_span[0], t_end, max(2, int((t_end - t_span[0]) / 0.5) + 1)),
+        )
+        if not sol.success:
+            logger.warning("DOP853 integration failed: %s", sol.message)
+        times = sol.t
+        states = sol.y
+        times, states, _ = _apply_separations(
+            times, states, separations, separation_events, stage_thrust_model,
+            eom, mkv, cfg, peak_thrust, thrust_fn, mass_floor,
+        )
+    else:
+        # Default RK45 (historical explicit Runge-Kutta stepper).
+        integrator = RK45(_make_rhs(), t_span[0], state0, t_end,
+                          max_step=cfg.max_step, rtol=cfg.rtol, atol=cfg.atol)
+        times = [integrator.t]
+        states = [integrator.y.copy()]
+        applied = set()
+        while integrator.status == "running":
+            integrator.step()
+            t = integrator.t
+            y = integrator.y
 
-    times = [integrator.t]
-    states = [integrator.y.copy()]
-    applied = set()
+            thrust_now = float(thrust_fn(t, {"m": y[13]})) if thrust_fn is not None else 0.0
+            sep_ctx = {"thrust": thrust_now, "peak_thrust": peak_thrust}
+            for i, sep in enumerate(separations):
+                if i in applied:
+                    continue
+                if (separation_events and separation_events[i].should_trigger(t, y, sep_ctx)) or (
+                    integrator.status != "running"
+                ):
+                    applied.add(i)
+                    y = np.array(y, copy=True)
+                    y[13] = max(y[13] - sep.mass_drop, mass_floor)
+                    y[3:6] = y[3:6] + sep.impulse / max(y[13], 1e-6)
+                    if getattr(sep, "spin_impulse", None) is not None:
+                        y[10:13] = y[10:13] + np.asarray(sep.spin_impulse) / max(y[13], 1e-6)
+                    if stage_thrust_model is not None:
+                        inert = stage_thrust_model.inertia_after_separation(i)
+                        if inert is not None:
+                            cg = stage_thrust_model.cg_after_separation(i)
+                            eom.set_inertia(inert, cg)
+                    integrator.y = y
 
-    while integrator.status == "running":
-        integrator.step()
-        t = integrator.t
-        y = integrator.y
+            if mkv is not None and not getattr(mkv, "separated", False):
+                # Terminal phase for RK45: recompute statelessly at this state.
+                ctx = {"thrust": thrust_now, "peak_thrust": peak_thrust,
+                       "dry_mass": getattr(eom, "dry_mass", -1.0), "target_state": None}
+                phase_now = _phase_stateless(t, integrator.y, phase_events, ctx)
+                if phase_now == "terminal":
+                    y = np.array(integrator.y, copy=True)
+                    y[13] = max(y[13] - mkv.kv_mass, mass_floor)
+                    y[3:6] = y[3:6] + mkv.v_rel * np.array([1.0, 0.0, 0.0])
+                    integrator.y = y
+                    mkv.separated = True
 
-        # Inject separation / MKV impulses when their burnout event crosses.
-        thrust_now = float(thrust_fn(t, {"m": y[13]})) if thrust_fn is not None else 0.0
-        sep_ctx = {"thrust": thrust_now, "peak_thrust": peak_thrust}
-        for i, sep in enumerate(separations):
-            if i in applied:
-                continue
-            # Event-driven: fire only when the stage's SeparationEvent triggers
-            # (physical burnout: past ignition+burn AND thrust ~0), so a low-thrust
-            # or coasting vehicle cannot spuriously jettison a live stage.
-            if (separation_events and separation_events[i].should_trigger(t, y, sep_ctx)) or (
-                integrator.status != "running"
-            ):
-                applied.add(i)
-                y = np.array(y, copy=True)
-                y[13] = max(y[13] - sep.mass_drop, 1e-3)
-                y[3:6] = y[3:6] + sep.impulse / max(y[13], 1e-6)
-                if getattr(sep, "spin_impulse", None) is not None:
-                    y[10:13] = y[10:13] + np.asarray(sep.spin_impulse) / max(y[13], 1e-6)
-                # Phase 1B.2: recompute the flying-bus inertia + CG after the
-                # spent stage is jettisoned so the angular EOM stays physical.
-                if stage_thrust_model is not None:
-                    inert = stage_thrust_model.inertia_after_separation(i)
-                    if inert is not None:
-                        cg = stage_thrust_model.cg_after_separation(i)
-                        eom.set_inertia(inert, cg)
-                # Re-inject as the integrator's current state for the next step.
-                integrator.y = y
+            times.append(integrator.t)
+            states.append(integrator.y.copy())
 
-        # Multi-KV payload separation: once the event loop reaches terminal
-        # phase (or burnouts), eject the KV bus and hand momentum to the KV
-        # (1A.3). Guarded so it fires exactly once.
-        if mkv is not None and not getattr(mkv, "separated", False) and _closed_loop_rhs._phase == "terminal":
-            y = np.array(y, copy=True)
-            y[13] = max(y[13] - mkv.kv_mass, 1e-3)
-            y[3:6] = y[3:6] + mkv.v_rel * np.array([1.0, 0.0, 0.0])
-            integrator.y = y
-            mkv.separated = True
+            if integrator.t >= t_end:
+                integrator.status = "finished"
 
-        times.append(integrator.t)
-        states.append(integrator.y.copy())
+        times = np.array(times)
+        states = np.column_stack(states)
 
-        if integrator.t >= min(t_span[1], cfg.t_max):
-            integrator.status = "finished"
-
-    sol_t = np.array(times)
-    sol_y = np.column_stack(states)
+    sol_t = np.asarray(times)
+    sol_y = np.asarray(states)
+    if sol_y.ndim == 1:
+        sol_y = sol_y.reshape(-1, 1)
 
     r = sol_y[:3, -1]
-    target_final = target_fn(min(t_span[1], cfg.t_max))
+    target_final = target_fn(t_end)
     miss = float(np.linalg.norm(r - target_final[:3]))
     kill = guidance_law.terminal.kill_assessment(miss)
 
@@ -555,6 +653,17 @@ class EngagementRunner:
                 self.interceptor, self.guidance, self.target, self.scenario,
                 perturb=perturbations, cfg=cfg, rng=rng,
             )
+            # Phase 3.4: reject non-finite (NaN/Inf) trials so they cannot
+            # silently pollute kill statistics; log for traceability.
+            if not np.isfinite(miss):
+                if cfg.reject_nonfinite:
+                    logger.warning("rejecting non-finite miss distance (trial); "
+                                   "cf. numerical safeguard 3.4")
+                    continue
+                mc_misses.append(float("nan"))
+                mc_kills.append(False)
+                mc_perturbs.append(perturbations)
+                continue
             mc_misses.append(miss)
             mc_kills.append(kill)
             mc_perturbs.append(perturbations)
@@ -571,5 +680,5 @@ class EngagementRunner:
             miss_distance=nominal_miss,
             kill_assessment=nominal_kill,
             monte_carlo=mc,
-            metadata={"n_trials": n_trials},
+            metadata={"n_trials": n_trials, "n_rejected": mc.n_rejected},
         )

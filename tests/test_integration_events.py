@@ -9,7 +9,7 @@ from project_icarus.sim.runner import (
     ThrustCutoffEvent,
     ReentryEvent,
     RangeEvent,
-    _current_phase,
+    _phase_stateless,
 )
 from project_icarus.sim.config import SimConfig
 from project_icarus.dynamics.thrust import StageSpec, StageSeparation
@@ -87,11 +87,21 @@ class TestPhaseEvents:
         ]
         y = np.zeros(14)
         ctx = {"phase": "boost", "peak_thrust": 0.0, "thrust": 0.0, "dry_mass": -1.0}
-        assert _current_phase(0.0, y, events, ctx) == "boost"
-        events2 = [ReentryEvent(alt=100e3, next_phase="terminal")]
-        ctx2 = {"phase": "midcourse", "target_state": None}
+        assert _phase_stateless(0.0, y, events, ctx) == "boost"
+        # Stateless phase engine derives the active phase purely from the
+        # registered events, so a midcourse->terminal transition requires the
+        # boost->midcourse (thrust cutoff) event to be present in the set.
+        events2 = [
+            ThrustCutoffEvent(frac=1e-3, next_phase="midcourse"),
+            ReentryEvent(alt=100e3, next_phase="terminal"),
+        ]
+        # Degenerate (zero-mass, zero-thrust) inputs never satisfy the
+        # boost->midcourse thrust-cutoff, so give the state a real mass at/below
+        # its dry mass to let the cutoff fire, then reentry reaches terminal.
+        ctx2 = {"peak_thrust": 0.0, "thrust": 0.0, "dry_mass": 100.0, "target_state": None}
         y[:3] = np.array([R_EARTH + 50e3, 0.0, 0.0])
-        assert _current_phase(100.0, y, events2, ctx2) == "terminal"
+        y[13] = 100.0
+        assert _phase_stateless(100.0, y, events2, ctx2) == "terminal"
 
 
 class TestMultiStageThrust:

@@ -1,4 +1,2 @@
-- Rename src/ to project-icarus/ and update imports accordingly to maintain python package structure
-- Add extensive report generation capabilities and ability to audit every component at every stage (through logging or the like)
-- Expand interceptor and target missile libraries with accurate geometries, aerodynamics, and performance characteristics
-- Add Patriot and THAAD interceptor system capabilities (with deployed coords and alt.)
+- Extend and fortify target ICBM, Cruise Missile, and HGV trajectory modeling and simulations to be physically accurate for any given target launch site and defended target pair.
+- Thoroughly inspect entire codebase for potential efficiency improvements (more advanced algorithms, parallelization, vectorization, etc), make sure to intelligently and creatively utilize existing nvidia gpu hardware.
