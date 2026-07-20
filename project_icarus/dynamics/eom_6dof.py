@@ -36,6 +36,9 @@ class EOM6DOF:
         atmosphere=None,
         use_j2=True,
         use_high_order=True,
+        use_j3=True,
+        use_j4=True,
+        max_degree=10,
         use_third_body=False,
         use_tides=False,
         solar_time=None,
@@ -54,6 +57,9 @@ class EOM6DOF:
         self.atmosphere = atmosphere if atmosphere is not None else Atmosphere(boundary_alt, taper_width)
         self.use_j2 = use_j2
         self.use_high_order = use_high_order
+        self.use_j3 = use_j3
+        self.use_j4 = use_j4
+        self.max_degree = max_degree
         self.use_third_body = use_third_body
         self.use_tides = use_tides
         self.solar_time = solar_time if solar_time is not None else datetime(2000, 3, 21, 12, 0, 0)
@@ -161,6 +167,7 @@ class EOM6DOF:
                 pass
         g_inertial = gravity_inertial(
             r, use_j2=self.use_j2, use_high_order=self.use_high_order,
+            use_j3=self.use_j3, use_j4=self.use_j4, max_degree=self.max_degree,
             use_third_body=self.use_third_body, use_tides=self.use_tides, t=t,
         )
         f_gravity_body = rotate_inertial_to_body(g_inertial, q)

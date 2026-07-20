@@ -402,6 +402,34 @@ class TestNRLMSISEAtmosphere:
 
 
 class TestHigherOrderGravity:
+    def test_j3_j4_independent_toggle(self):
+        # J3/J4 must be independently togglable (Phase 3.1) and absent from the
+        # central field. Use an off-axis point so the odd/even zonal terms are
+        # non-zero.
+        r = np.array([5000e3, 0.0, 5000e3])
+        g_j2_only = gravity_inertial(r, use_j2=True, use_j3=False, use_j4=False)
+        g_j3 = gravity_inertial(r, use_j2=True, use_j3=True, use_j4=False)
+        g_j4 = gravity_inertial(r, use_j2=True, use_j3=False, use_j4=True)
+        # Enabling J3 changes the field (it is an odd zonal term).
+        assert not np.allclose(g_j2_only, g_j3, rtol=0.0, atol=1e-10)
+        # Enabling J4 changes the field (even zonal term).
+        assert not np.allclose(g_j2_only, g_j4, rtol=0.0, atol=1e-10)
+        # J3 contribution is small relative to the J2-dominated field.
+        assert np.linalg.norm(g_j3 - g_j2_only) < 1e-2 * np.linalg.norm(g_j2_only)
+
+    def test_max_degree_selectable(self):
+        # max_degree selects the upper bound of the EGM2008 zonal series
+        # (Phase 3.1 "higher-order EGM2008 toggle").
+        r = np.array([5000e3, 0.0, 5000e3])
+        g_deg4 = gravity_inertial(r, use_high_order=True, max_degree=4)
+        g_deg10 = gravity_inertial(r, use_high_order=True, max_degree=10)
+        # Higher degree adds tiny but non-zero J5..J10 terms.
+        assert not np.allclose(g_deg4, g_deg10, rtol=0.0, atol=1e-10)
+        assert np.linalg.norm(g_deg10 - g_deg4) > 1e-12
+        # max_degree=4 must equal the J2..J4 field with high-order disabled.
+        g_base = gravity_inertial(r, use_high_order=False)
+        assert np.allclose(g_deg4, g_base, rtol=0.0, atol=1e-12)
+
     def test_high_order_perturbation_small(self):
         # Use a mid-latitude point so zonal harmonics P_n^0(z/r) are nonzero.
         r = np.array([5000e3, 0.0, 5000e3])

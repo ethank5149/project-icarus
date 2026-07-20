@@ -54,28 +54,38 @@ def _moon_direction_ecef(t):
 
 
 def gravity_inertial(r_inertial, use_j2=True, j2=J2, j3=J3, j4=J4,
-                     use_high_order=True, use_third_body=False, use_tides=False, t=0.0):
+                      use_high_order=True, use_third_body=False, use_tides=False,
+                      t=0.0, use_j3=True, use_j4=True, max_degree=10):
+    """Central + zonal geopotential acceleration (EGM2008 zonal coefficients).
+
+    The zonal series is now selectable by ``max_degree`` (the "higher-order
+    EGM2008 toggle" from Phase 3.1) and J3/J4 can be enabled independently of
+    J2. ``use_high_order`` retains its historical meaning (include J5..J10);
+    when ``max_degree`` is set it overrides the upper bound explicitly. J2/J3/J4
+    are each individually toggled via ``use_j2``/``use_j3``/``use_j4``.
+    """
     r = np.linalg.norm(r_inertial)
     if r < 1e-6:
         return np.zeros(3)
     alt = r - R_EARTH
     g = -MU_EARTH / (r**3) * r_inertial
 
-    if (use_j2 or use_high_order) and alt > 50e3:
+    if (use_j2 or use_high_order or use_j3 or use_j4) and alt > 50e3:
         z = r_inertial[2]
         zr = z / r
+        factor = 1.0
         if use_j2:
-            factor = 1.0
             factor += 1.5 * j2 * (R_EARTH / r) ** 2 * (5.0 * zr**2 - 1.0)
-            if j3 != 0.0:
-                factor += 0.5 * j3 * (R_EARTH / r) ** 3 * (7.0 * zr**3 - 3.0 * zr)
-            if j4 != 0.0:
-                factor += 0.125 * j4 * (R_EARTH / r) ** 4 * (9.0 * zr**4 + 3.0 * zr**2 - 0.6)
+        if use_j3:
+            factor += 0.5 * j3 * (R_EARTH / r) ** 3 * (7.0 * zr**3 - 3.0 * zr)
+        if use_j4:
+            factor += 0.125 * j4 * (R_EARTH / r) ** 4 * (9.0 * zr**4 + 3.0 * zr**2 - 0.6)
+        if use_j2 or use_j3 or use_j4:
             g = -MU_EARTH / (r**3) * factor * r_inertial
         if use_high_order:
-            # Higher-order EGM2008 zonal harmonics J5..J10 (n>4), k=0 sectorials.
+            # Higher-order EGM2008 zonal harmonics, selectable up to max_degree.
             series = 0.0
-            for n in range(5, 11):
+            for n in range(5, max_degree + 1):
                 jn = _ZONAL_JN.get(n, 0.0)
                 if jn == 0.0:
                     continue
