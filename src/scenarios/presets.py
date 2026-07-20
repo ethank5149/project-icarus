@@ -28,6 +28,9 @@ _WGS84_F = 1.0 / 298.257223563
 _WGS84_B = _WGS84_A * (1.0 - _WGS84_F)
 _WGS84_E2 = (_WGS84_A**2 - _WGS84_B**2) / _WGS84_A**2
 
+# reference/locations.yml stores site altitudes in FEET; geodetic_to_ecef wants m.
+_FT_TO_M = 0.3048
+
 
 def geodetic_to_ecef(lat_deg: float, lon_deg: float, alt_m: float = 0.0) -> np.ndarray:
     """Convert geodetic (WGS84) latitude/longitude/height to ECEF position."""
@@ -658,7 +661,7 @@ def _register_from_locations():
         r0 = geodetic_to_ecef(
             float(coord["latitude"]),
             float(coord["longitude"]),
-            float(coord.get("altitude", 0.0)),
+            _FT_TO_M * float(coord.get("altitude", 0.0)),
         )
         v0 = np.array([0.0, v_mag, 0.0])
         tags = ", ".join(rec.get("tags", [])[:2])
@@ -691,7 +694,7 @@ def _register_from_locations():
         r0 = geodetic_to_ecef(
             float(coord["latitude"]),
             float(coord["longitude"]),
-            float(coord.get("altitude", 0.0)),
+            _FT_TO_M * float(coord.get("altitude", 0.0)),
         )
         tags = ", ".join(rec.get("tags", [])[:2])
         key = "defended_" + _sanitize_key(name)
@@ -748,10 +751,10 @@ def _register_from_locations():
             preset = geodetic_launch_to_target(
                 float(threat["latitude"]),
                 float(threat["longitude"]),
-                float(threat.get("altitude", 0.0)),
+                _FT_TO_M * float(threat.get("altitude", 0.0)),
                 float(defended["latitude"]),
                 float(defended["longitude"]),
-                float(defended.get("altitude", 0.0)),
+                _FT_TO_M * float(defended.get("altitude", 0.0)),
                 launch_el_deg=45.0,
                 scenario_type=sc_type,
                 engagement_end=1200.0,
@@ -839,10 +842,10 @@ def build_threat_to_defended(
     return geodetic_launch_to_target(
         float(threat["latitude"]),
         float(threat["longitude"]),
-        float(threat.get("altitude", 0.0)),
+        _FT_TO_M * float(threat.get("altitude", 0.0)),
         float(defended["latitude"]),
         float(defended["longitude"]),
-        float(defended.get("altitude", 0.0)),
+        _FT_TO_M * float(defended.get("altitude", 0.0)),
         launch_el_deg=launch_el_deg,
         scenario_type=scenario_type,
         engagement_end=engagement_end,

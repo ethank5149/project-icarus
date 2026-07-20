@@ -1,3 +1,5 @@
+# Important Convention: Altitudes are in feet
+
 locations:
   # ==========================================
   # STRATEGIC HOMELAND & DEFENDED TARGETS
@@ -707,3 +709,82 @@ locations:
     designation: target-launch-site
     tags:
       - Strategic homeport for Type 094 SSBNs carrying JL-2 and JL-3 SLBMs (7,000-10,000+ km range).
+
+  # ==========================================
+  # EARLY-WARNING / DISCRIMINATION RADAR SENSORS
+  # (OSINT-approximate geodetic sites; ranges are nominal kinematic
+  #  detection ranges used by the Phase 5A sensor layer.)
+  # ==========================================
+  - name: Pituffik Space Base (Thule Site J)
+    state: Greenland
+    country: United States
+    coordinates:
+      latitude: 76.57
+      longitude: -68.30
+      altitude: 1148
+    designation: sensor
+    tags:
+      - Long-Range Early-Warning Radar (UEWR/BMEWS)
+      - Northern-approach ICBM/SLBM detection, tracking, space surveillance
+  - name: RAF Fylingdales
+    state: North Yorkshire
+    country: United Kingdom
+    coordinates:
+      latitude: 54.36
+      longitude: -0.67
+      altitude: 820
+    designation: sensor
+    tags:
+      - Long-Range Early-Warning Radar (UEWR/BMEWS)
+      - ICBM/SLBM detection & tracking; NATO/US early warning
+  - name: Beale AFB
+    state: California
+    country: United States
+    coordinates:
+      latitude: 39.14
+      longitude: -121.35
+      altitude: 492
+    designation: sensor
+    tags:
+      - PAVE PAWS / UEWR
+      - West Coast SLBM/ICBM warning; BMD cueing
+  - name: Cape Cod SFS
+    state: Massachusetts
+    country: United States
+    coordinates:
+      latitude: 41.75
+      longitude: -70.54
+      altitude: 246
+    designation: sensor
+    tags:
+      - PAVE PAWS / UEWR
+      - East Coast SLBM/ICBM detection; missile warning & space tracking
+  - name: Clear SFS
+    state: Alaska
+    country: United States
+    coordinates:
+      latitude: 64.29
+      longitude: -149.19
+      altitude: 574
+    designation: sensor
+    tags:
+      - Long Range Discrimination Radar (LRDR) site
+      - PAVE PAWS / UEWR + LRDR; advanced discrimination of ICBMs vs decoys
+  - name: Eareckson AS (Shemya)
+    state: Alaska
+    country: United States
+    coordinates:
+      latitude: 52.74
+      longitude: 174.09
+      altitude: 492
+    designation: sensor
+    tags:
+      - COBRA Dane (L-band phased-array)
+      - Tracks foreign ICBM/SLBM tests; space surveillance; long-range signatures
+
+  # NOTE: The following are intentionally NOT fixed geodetic sensor sites and
+  # are omitted as coordinates here (captured for completeness as comments):
+  #   - AN/TPY-2 Forward-Based X-band: transportable (Japan, Turkey, Israel, Guam, CENTCOM); ~3,000 km range.
+  #   - SBX-1 Sea-Based X-Band: mobile Pacific platform; supports GMD discrimination.
+  #   - SBIRS / HBTSS / OPIR: geosynchronous & LEO space-based IR; global launch detection.
+  #   - Aegis SPY-1 / SPY-6: mobile US Navy ships; sea-based BMD tracking/intercepts.
