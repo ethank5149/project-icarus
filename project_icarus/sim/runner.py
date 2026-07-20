@@ -10,6 +10,7 @@ from ..guidance.boost_guidance import BoostGuidance
 from ..guidance.midcourse_guidance import MidcourseGuidance
 from ..guidance.terminal_guidance import TerminalGuidance
 from ..interceptors.config import InterceptorConfig
+from ..dynamics.thrust import MultiStageThrustModel, MKVSystem
 from ..guidance.law import GuidanceLaw
 from ..scenarios.target_factory import TargetScenario
 from ..scenarios.scenario import EngagementScenario
@@ -95,6 +96,45 @@ class SpeedEvent(PhaseEvent):
 
     def should_trigger(self, t, y, ctx):
         return np.linalg.norm(y[3:6]) < self.speed
+
+
+class SeparationEvent(PhaseEvent):
+    """Fires when a stage burns out so its separation impulse can be injected.
+
+    Unlike the time-based ``StageSeparation.time`` default, this event triggers
+    on the *physics* of burnout: the active stage's thrust has dropped to
+    ``frac`` of the observed peak AND ``t`` has reached (or passed) the nominal
+    ignition+burn boundary for ``stage_idx``. This makes stage jettison robust to
+    a coasting/low-thrust vehicle that would otherwise spuriously fire a timed
+    separation (Phase 1A.3 / 1B.1). The integrator loop consumes this event to
+    apply the mass drop + delta-v and recompute the bus inertia/CG.
+    """
+
+    def __init__(self, stage_idx: int, thrust_model, cfg: "SimConfig" = None,
+                 frac: float = 1e-3, next_phase: str = "midcourse"):
+        super().__init__(next_phase)
+        self.stage_idx = stage_idx
+        self.thrust_model = thrust_model
+        self.frac = frac
+        self._ignition = 0.0
+        if thrust_model is not None and hasattr(thrust_model, "_ignition_times"):
+            times = thrust_model._ignition_times
+            if 0 <= stage_idx < len(times):
+                self._ignition = times[stage_idx]
+            burn = getattr(thrust_model, "stages", [None])[stage_idx].burn_time if (
+                hasattr(thrust_model, "stages") and 0 <= stage_idx < len(thrust_model.stages)
+            ) else 0.0
+            self._burnout = self._ignition + burn
+        else:
+            self._burnout = float("inf")
+
+    def should_trigger(self, t, y, ctx):
+        if t < self._burnout:
+            return False
+        peak = ctx.get("peak_thrust", 0.0)
+        if peak > 0.0 and ctx.get("thrust", 0.0) < self.frac * peak:
+            return True
+        return False
 
 
 def _default_events(cfg: SimConfig):
@@ -359,8 +399,26 @@ def _integrate_trajectory(interceptor, guidance_law, target, scenario, perturb=N
     thrust_fn = getattr(interceptor, "_thrust_callable", None)
     peak_thrust = float(getattr(interceptor, "peak_thrust", 0.0) or 0.0)
 
+    # Keep the multi-stage model object so the loop can recompute bus inertia/CG
+    # after each separation (Phase 1B.2). The property rebuilds a fresh model,
+    # which is fine since separation state is keyed by index, not mutated here.
+    stage_thrust_model = None
+    if getattr(interceptor, "stages", None):
+        stage_thrust_model = MultiStageThrustModel(interceptor.stages, interceptor.sep_impulses)
+
     # Collect separation / MKV events to inject mid-integration.
     separations = getattr(interceptor, "_separations", []) or []
+
+    # Optional multi-KV (MKVSystem) separation at terminal, if the vehicle
+    # declares an MKV payload mass (1A.3).
+    mkv = getattr(interceptor, "_mkv", None)
+
+    # Event-driven stage separations (Phase 1A.3): one SeparationEvent per stage,
+    # fired on physical burnout rather than a hard-coded time.
+    separation_events = [
+        SeparationEvent(i, stage_thrust_model, cfg)
+        for i in range(len(separations))
+    ] if stage_thrust_model is not None else []
 
     t_span = [scenario.engagement_start, scenario.engagement_end]
     target_fn = lambda t: target.propagate(t)
@@ -390,22 +448,43 @@ def _integrate_trajectory(interceptor, guidance_law, target, scenario, perturb=N
         t = integrator.t
         y = integrator.y
 
-        # Inject separation / MKV impulses at their crossing times.
+        # Inject separation / MKV impulses when their burnout event crosses.
+        thrust_now = float(thrust_fn(t, {"m": y[13]})) if thrust_fn is not None else 0.0
+        sep_ctx = {"thrust": thrust_now, "peak_thrust": peak_thrust}
         for i, sep in enumerate(separations):
             if i in applied:
                 continue
-            sep_time = getattr(sep, "time", None)
-            if sep_time is None:
-                continue
-            if t >= sep_time or integrator.status != "running":
+            # Event-driven: fire only when the stage's SeparationEvent triggers
+            # (physical burnout: past ignition+burn AND thrust ~0), so a low-thrust
+            # or coasting vehicle cannot spuriously jettison a live stage.
+            if (separation_events and separation_events[i].should_trigger(t, y, sep_ctx)) or (
+                integrator.status != "running"
+            ):
                 applied.add(i)
                 y = np.array(y, copy=True)
                 y[13] = max(y[13] - sep.mass_drop, 1e-3)
                 y[3:6] = y[3:6] + sep.impulse / max(y[13], 1e-6)
                 if getattr(sep, "spin_impulse", None) is not None:
                     y[10:13] = y[10:13] + np.asarray(sep.spin_impulse) / max(y[13], 1e-6)
+                # Phase 1B.2: recompute the flying-bus inertia + CG after the
+                # spent stage is jettisoned so the angular EOM stays physical.
+                if stage_thrust_model is not None:
+                    inert = stage_thrust_model.inertia_after_separation(i)
+                    if inert is not None:
+                        cg = stage_thrust_model.cg_after_separation(i)
+                        eom.set_inertia(inert, cg)
                 # Re-inject as the integrator's current state for the next step.
                 integrator.y = y
+
+        # Multi-KV payload separation: once the event loop reaches terminal
+        # phase (or burnouts), eject the KV bus and hand momentum to the KV
+        # (1A.3). Guarded so it fires exactly once.
+        if mkv is not None and not getattr(mkv, "separated", False) and _closed_loop_rhs._phase == "terminal":
+            y = np.array(y, copy=True)
+            y[13] = max(y[13] - mkv.kv_mass, 1e-3)
+            y[3:6] = y[3:6] + mkv.v_rel * np.array([1.0, 0.0, 0.0])
+            integrator.y = y
+            mkv.separated = True
 
         times.append(integrator.t)
         states.append(integrator.y.copy())

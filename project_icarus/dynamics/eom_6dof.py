@@ -1,5 +1,6 @@
 import numpy as np
 from datetime import datetime
+from typing import Optional
 
 from .coordinate_systems import (
     quat_normalize,
@@ -45,6 +46,7 @@ class EOM6DOF:
         self.mass = mass
         self.inertia = np.array(inertia, dtype=float)
         self.inertia_inv = np.linalg.inv(self.inertia)
+        self.cg = np.zeros(3)
         self.area = area
         self.ref_length = ref_length
         self.boundary_alt = boundary_alt
@@ -71,6 +73,19 @@ class EOM6DOF:
 
     def set_thrust(self, thrust_model):
         self.thrust_model = thrust_model
+
+    def set_inertia(self, inertia: np.ndarray, cg: Optional[np.ndarray] = None):
+        """Update inertial properties after a stage separation (Phase 1B.2).
+
+        Recomputes ``inertia_inv`` so the Newton-Euler angular term and the
+        gravity-gradient torque use the post-separation bus inertia. ``cg`` is the
+        post-separation centre-of-gravity offset (body frame) used by the
+        gravity-gradient torque.
+        """
+        self.inertia = np.array(inertia, dtype=float)
+        self.inertia_inv = np.linalg.inv(self.inertia)
+        if cg is not None:
+            self.cg = np.asarray(cg, dtype=float)
 
     def add_separation(self, sep):
         self.separations.append(sep)
@@ -155,7 +170,9 @@ class EOM6DOF:
         f_total_body = f_aero_body + f_thrust_body
 
         f_total_inertial = rotate_body_to_inertial(f_total_body, q)
-        m_gravity_body = gravity_gradient_torque(r, q, self.inertia_inv, use_j2=self.use_j2)
+        m_gravity_body = gravity_gradient_torque(
+            r, q, self.inertia_inv, cg=self.cg, use_j2=self.use_j2
+        )
         m_total_body = m_aero_body + m_thrust_body + m_gravity_body
 
         dr_dt = v

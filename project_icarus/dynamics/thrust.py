@@ -113,6 +113,13 @@ class StageSpec:
     of time-since-stage-ignition. ``burn_time`` is the nominal burn duration; the
     stage is considered burnt out when ``t_stage >= burn_time`` or thrust hits 0.
     ``wet_mass``/``dry_mass`` bound the propellant mass available for this stage.
+
+    ``inertia`` is the residual bus inertia (kg m^2, diagonal) AFTER this stage
+    and all spent stages below it have separated — i.e. the inertia the vehicle
+    flies with once ``burn_time`` elapses and the stage is jettisoned. ``cg`` is
+    the corresponding centre-of-gravity offset (m, body frame) used for the
+    gravity-gradient torque. Both feed the post-separation inertia update in the
+    integrator loop (Phase 1B.2).
     """
 
     thrust: Callable[[float], float]
@@ -123,6 +130,8 @@ class StageSpec:
     gimbal_limits: tuple = (np.radians(15), np.radians(15))
     gimbal_rate: float = np.radians(30)
     name: str = "stage"
+    inertia: Optional[np.ndarray] = None
+    cg: Optional[np.ndarray] = None
 
 
 class MultiStageThrustModel:
@@ -212,3 +221,37 @@ class MultiStageThrustModel:
     @property
     def separations(self) -> List[StageSeparation]:
         return [self.separation_for_stage(i) for i in range(len(self.stages))]
+
+    def inertia_after_separation(self, stage_idx: int) -> Optional[np.ndarray]:
+        """Residual bus inertia (kg m^2) once stage ``stage_idx`` is jettisoned.
+
+        The flying vehicle keeps the inertia declared on the *next* stage
+        (which physically carries the upper bus); for the final stage burnout it
+        falls back to that stage's own declared ``inertia``. Returns ``None`` when
+        neither the next stage nor the separated stage declares an inertia.
+        """
+        n = len(self.stages)
+        if stage_idx < 0 or stage_idx >= n:
+            return None
+        for idx in (stage_idx + 1, stage_idx):
+            if idx < n:
+                inert = self.stages[idx].inertia
+                if inert is not None:
+                    return np.asarray(inert, dtype=float)
+        return None
+
+    def cg_after_separation(self, stage_idx: int) -> Optional[np.ndarray]:
+        """Residual bus CG offset (m, body frame) once stage ``stage_idx`` separates.
+
+        Mirrors :meth:`inertia_after_separation`: the flying bus inherits the CG
+        declared on the next stage, falling back to the separated stage's CG.
+        """
+        n = len(self.stages)
+        if stage_idx < 0 or stage_idx >= n:
+            return None
+        for idx in (stage_idx + 1, stage_idx):
+            if idx < n:
+                cg = self.stages[idx].cg
+                if cg is not None:
+                    return np.asarray(cg, dtype=float)
+        return None

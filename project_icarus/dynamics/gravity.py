@@ -145,11 +145,17 @@ def gravity_body(r_inertial, q, use_j2=True):
     return rotate_inertial_to_body(g_i, q)
 
 
-def gravity_gradient_torque(r_inertial, q, inertia_inv, use_j2=True):
+def gravity_gradient_torque(r_inertial, q, inertia_inv, use_j2=True, cg=None):
     r = np.linalg.norm(r_inertial)
     if r < 1e-6:
         return np.zeros(3)
     g_i = gravity_inertial(r_inertial, use_j2=use_j2)
     g_body = rotate_inertial_to_body(g_i, q)
     r_body = rotate_inertial_to_body(r_inertial, q)
+    # Post-separation centre-of-gravity offset (body frame, metres). The gravity
+    # gradient torque is evaluated about the CG, so shift the lever arm when the
+    # CG is not at the body origin (Phase 1B.2).
+    if cg is not None:
+        cg_body = np.asarray(cg, dtype=float)
+        r_body = r_body - cg_body
     return np.cross(r_body, inertia_inv @ (np.cross(r_body, g_body)))

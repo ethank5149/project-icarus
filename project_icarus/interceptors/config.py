@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional, List, Any
 import numpy as np
 
-from ..dynamics.thrust import StageSeparation, MultiStageThrustModel, StageSpec
+from ..dynamics.thrust import StageSeparation, MultiStageThrustModel, StageSpec, MKVSystem
 
 
 @dataclass
@@ -60,6 +60,18 @@ class InterceptorConfig:
             model = MultiStageThrustModel(self.stages, self.sep_impulses)
             return [s for s in model.separations if s is not None]
         return []
+
+    @property
+    def _mkv(self) -> Optional[Any]:
+        """Optional multi-KV payload (Phase 1A.3), wired only when the vehicle
+        declares a non-zero KV mass. The runner ejects it at terminal phase."""
+        if self.mkv_mass and self.mkv_mass > 0.0:
+            return MKVSystem(
+                kv_mass=self.mkv_mass,
+                v_rel=1.5,
+                divert_thrust=self.mkv_divert_impulse,
+            )
+        return None
 
 
 @dataclass
