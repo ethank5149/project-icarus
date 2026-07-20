@@ -127,13 +127,13 @@ class EOM6DOF:
 
         alt = _geodetic_altitude(r)
         v_mag = np.linalg.norm(v)
-        rho = self.atmosphere.density(np.array([alt]))[0]
+        rho = self.atmosphere.density_scalar(alt)
         q_dyn = 0.5 * rho * v_mag**2
 
         C = quat_to_dcm(q)
         v_body = C.T @ v
         v_body_mag = np.linalg.norm(v_body)
-        mach = v_mag / max(self.atmosphere.speed_of_sound(np.array([alt]))[0], 1e-6)
+        mach = v_mag / max(self.atmosphere.speed_of_sound_scalar(alt), 1e-6)
 
         alpha = np.degrees(np.arctan2(v_body[2], v_body[0]))
         beta = np.degrees(np.arcsin(np.clip(v_body[1] / max(v_body_mag, 1e-6), -1.0, 1.0)))
@@ -141,7 +141,7 @@ class EOM6DOF:
         cd, cy, cm = surrogate_func(mach, alpha, beta, alt)
         cn, cl_roll = self._analytic_cn_cl_roll(mach, alpha, beta, alt)
 
-        endo = self.atmosphere.is_endo(np.array([alt]))[0]
+        endo = alt < self.boundary_alt
         if not endo:
             cd *= 0.0
             cy *= 0.0

@@ -117,6 +117,69 @@ class MultiOutputGPR:
             return np.column_stack(means), np.column_stack(stds)
         return np.column_stack(means)
 
+    def predict_cupy(self, X, return_std=False):
+        """GPU-accelerated batch prediction using CuPy.
+
+        Transfers training data to GPU once, then evaluates the RBF kernel
+        on the GPU for large batches.  Falls back to CPU if CuPy is unavailable
+        or if the batch is too small to amortise the transfer cost.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_query, n_features)
+        return_std : bool
+
+        Returns
+        -------
+        means : ndarray, shape (n_query, n_coeff)
+        stds : ndarray, shape (n_query, n_coeff)  (if return_std)
+        """
+        try:
+            import cupy as cp
+        except ImportError:
+            return self.predict(X, return_std=return_std)
+
+        X = np.asarray(X, dtype=float)
+        n_query = X.shape[0]
+        if n_query < 64:
+            return self.predict(X, return_std=return_std)
+
+        X_train = self.models[0].X_train_
+        n_train = X_train.shape[0]
+        n_coeff = N_COEFF
+
+        X_cp = cp.asarray(X)
+        X_train_cp = cp.asarray(X_train)
+
+        means_cp = cp.empty((n_query, n_coeff), dtype=float)
+        stds_cp = cp.empty((n_query, n_coeff), dtype=float) if return_std else None
+
+        for i, model in enumerate(self.models):
+            ls, constant = _get_rbf_params(model.kernel_)
+            ls_cp = cp.asarray(ls, dtype=float)
+            y_std = getattr(model, "_y_train_std", 1.0)
+            alpha_cp = cp.asarray(model.alpha_, dtype=float)
+
+            K = constant**2 * cp.exp(
+                -0.5 * cp.sum((X_cp[:, None, :] - X_train_cp[None, :, :])**2 / ls_cp**2, axis=2)
+            )
+            mean_cp = K @ alpha_cp
+            means_cp[:, i] = mean_cp * y_std
+
+            if return_std:
+                K_diag = cp.sum(K**2, axis=1)
+                L = cp.linalg.cholesky(model.kernel_(X_train, X_train) + 1e-6 * cp.eye(n_train))
+                L_inv = cp.linalg.inv(L)
+                K_train_inv = L_inv.T @ L_inv
+                K_train_diag = cp.diag(cp.asarray(model.kernel_(X_train, X_train)))
+                var_cp = K_train_diag - K_diag + model._y_train_std**2
+                stds_cp[:, i] = cp.sqrt(cp.maximum(var_cp, 0.0)) * y_std
+
+        means = cp.asnumpy(means_cp)
+        if return_std:
+            return means, cp.asnumpy(stds_cp)
+        return means
+
     def jacobian_fd(self, X, eps=1e-6):
         """Central finite-difference Jacobian d(coeffs)/d(inputs).
 

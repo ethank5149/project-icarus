@@ -132,3 +132,54 @@ class TestCFDSweep:
         spec = SweepSpec(vehicle="tamir", backend="bogus")
         with pytest.raises(ValueError):
             run_sweep(spec)
+
+
+class TestScipyInterpBackend:
+    def test_scipy_interp_shape(self):
+        spec = SweepSpec(
+            vehicle="tamir", backend="scipy_interp",
+            mach_range=(0.5, 3.0, 3), alpha_range=(-5.0, 5.0, 3),
+            beta_range=(-2.0, 2.0, 2), altitude_range=(0.0, 100e3, 2),
+            delta_range=(0.0, 0.0, 1),
+        )
+        res = run_sweep(spec)
+        n = 3 * 3 * 2 * 2 * 1
+        assert res["coeffs"].shape == (n, 5)
+        assert list(res["coeff_names"]) == COEFF_NAMES
+        assert np.all(res["coeffs"][:, 0] >= 0.0)
+        assert np.all(np.isfinite(res["coeffs"]))
+
+    def test_scipy_interp_differs_from_analytic(self):
+        base = SweepSpec(
+            vehicle="tamir", backend="analytic",
+            mach_range=(2.0, 2.0, 1), alpha_range=(3.0, 3.0, 1),
+            beta_range=(1.0, 1.0, 1), altitude_range=(50e3, 50e3, 1),
+            delta_range=(1.0, 1.0, 1),
+        )
+        interp = SweepSpec(
+            vehicle="tamir", backend="scipy_interp",
+            mach_range=(2.0, 2.0, 1), alpha_range=(3.0, 3.0, 1),
+            beta_range=(1.0, 1.0, 1), altitude_range=(50e3, 50e3, 1),
+            delta_range=(1.0, 1.0, 1),
+        )
+        rb = run_sweep(base)
+        ri = run_sweep(interp)
+        assert not np.allclose(rb["coeffs"], ri["coeffs"])
+
+    def test_scipy_interp_control_deflection(self):
+        base = SweepSpec(
+            vehicle="tamir", backend="scipy_interp",
+            mach_range=(2.0, 2.0, 1), alpha_range=(0.0, 0.0, 1),
+            beta_range=(0.0, 0.0, 1), altitude_range=(0.0, 0.0, 1),
+            delta_range=(0.0, 0.0, 1),
+        )
+        defl = SweepSpec(
+            vehicle="tamir", backend="scipy_interp",
+            mach_range=(2.0, 2.0, 1), alpha_range=(0.0, 0.0, 1),
+            beta_range=(0.0, 0.0, 1), altitude_range=(0.0, 0.0, 1),
+            delta_range=(3.0, 3.0, 1),
+        )
+        rb = run_sweep(base)
+        rd = run_sweep(defl)
+        assert rd["coeffs"][0, 1] > rb["coeffs"][0, 1]
+        assert rd["coeffs"][0, 2] < rb["coeffs"][0, 2]

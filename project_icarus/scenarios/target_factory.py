@@ -8,6 +8,7 @@ from scipy.integrate import solve_ivp
 from ..dynamics.eom_6dof import EOM6DOF
 from ..guidance.terminal_guidance import TerminalGuidance
 from ..aero.aero_analytical import blended_aero
+from ..dynamics.atmosphere import Atmosphere
 
 
 MU_EARTH = 3.986004418e14
@@ -28,6 +29,20 @@ def _two_body_accel(r, use_j2=True):
         )
         a = factor * r
     return a
+
+
+def _rk4_step(r, v, dt, accel_func):
+    k1_v = accel_func(r, v)
+    k1_r = v
+    k2_v = accel_func(r + 0.5 * dt * k1_r, v + 0.5 * dt * k1_v)
+    k2_r = v + 0.5 * dt * k1_v
+    k3_v = accel_func(r + 0.5 * dt * k2_r, v + 0.5 * dt * k2_v)
+    k3_r = v + 0.5 * dt * k2_v
+    k4_v = accel_func(r + dt * k3_r, v + dt * k3_v)
+    k4_r = v + dt * k3_v
+    r_new = r + (dt / 6.0) * (k1_r + 2.0 * k2_r + 2.0 * k3_r + k4_r)
+    v_new = v + (dt / 6.0) * (k1_v + 2.0 * k2_v + 2.0 * k3_v + k4_v)
+    return r_new, v_new
 
 
 # --- Spherical-Earth geodetic helpers (for aim-point computation) ----------
@@ -435,38 +450,46 @@ class HGVScenario:
     cd: float = 0.05
     cl: float = 0.3
     skip_threshold_deg: float = 2.0
+    use_j2: bool = True
+    atmosphere: Optional[Atmosphere] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self):
+        if self.atmosphere is None:
+            self.atmosphere = Atmosphere()
+
+    def _accel(self, r, v):
+        vmag = np.linalg.norm(v)
+        if vmag < 1e-6:
+            return _two_body_accel(r, use_j2=self.use_j2)
+        g_unit = -r / np.linalg.norm(r)
+        v_unit = v / vmag
+        lift_dir = g_unit - np.dot(g_unit, v_unit) * v_unit
+        lift_norm = np.linalg.norm(lift_dir)
+        if lift_norm > 1e-6:
+            lift_dir = lift_dir / lift_norm
+        else:
+            lift_dir = np.zeros(3)
+        a_grav = _two_body_accel(r, use_j2=self.use_j2)
+        alt = np.linalg.norm(r) - R_EARTH
+        a_drag = np.zeros(3)
+        a_lift = np.zeros(3)
+        if 0.0 < alt < 150e3:
+            rho = self.atmosphere.density_scalar(alt)
+            q_dyn = 0.5 * rho * vmag**2
+            a_drag = -q_dyn * self.cd / self.ballistic_coeff * v_unit
+            gamma = np.arcsin(np.clip(v_unit[2], -1.0, 1.0))
+            if np.degrees(gamma) > self.skip_threshold_deg:
+                a_lift = q_dyn * self.cl / self.ballistic_coeff * lift_dir
+        return a_grav + a_drag + a_lift
+
     def propagate(self, t: float) -> np.ndarray:
-        # 3-DOF point-mass glide: gravity + drag + lift (perpendicular to v).
         r = self.r0.astype(float).copy()
         v = self.v0.astype(float).copy()
         dt = 0.5
         n = max(int(t / dt), 1)
         for _ in range(n):
-            vmag = np.linalg.norm(v)
-            if vmag < 1e-6:
-                break
-            g_unit = -r / np.linalg.norm(r)
-            v_unit = v / vmag
-            # Lift acts perpendicular to velocity in the vertical plane (z component).
-            lift_dir = g_unit - np.dot(g_unit, v_unit) * v_unit
-            lift_dir = lift_dir / max(np.linalg.norm(lift_dir), 1e-6)
-            a_grav = -MU_EARTH / np.linalg.norm(r)**3 * r
-            alt = np.linalg.norm(r) - R_EARTH
-            a_drag = np.zeros(3)
-            a_lift = np.zeros(3)
-            if alt < 150e3:
-                rho = 1.225 * np.exp(-alt / 8500.0)
-                q_dyn = 0.5 * rho * vmag**2
-                a_drag = -q_dyn * self.cd / self.ballistic_coeff * v_unit
-                # Skip-glide: pull up when flight-path angle exceeds threshold.
-                gamma = np.arcsin(np.clip(v_unit[2], -1.0, 1.0))
-                if np.degrees(gamma) > self.skip_threshold_deg:
-                    a_lift = q_dyn * self.cl / self.ballistic_coeff * lift_dir
-            a = a_grav + a_drag + a_lift
-            v = v + a * dt
-            r = r + v * dt
+            r, v = _rk4_step(r, v, dt, self._accel)
         return np.concatenate([r, v])
 
     @classmethod
@@ -688,22 +711,23 @@ class CruiseMissileScenario:
         vmag = np.linalg.norm(v)
         v_unit = v / max(vmag, 1e-9)
         cruise_speed = self.cruise_speed_mach * 340.0
+        atmo = Atmosphere()
+
+        def boost_accel(r, v):
+            a_thrust = self.boost_thrust / max(m, 1e-6) * v_unit
+            a_grav = _two_body_accel(r, use_j2=True)
+            alt = np.linalg.norm(r) - R_EARTH
+            rho = atmo.density_scalar(max(alt, 0.0))
+            q_dyn = 0.5 * rho * vmag**2
+            a_drag = -q_dyn * 0.3 / max(m, 1e-6) * v_unit
+            return a_grav + a_thrust + a_drag
 
         # --- Boost phase: rocket motor ---
         t_boost = np.arange(0.0, self.boost_duration + dt, dt)
         boost_states = []
         for _ in t_boost:
             boost_states.append(np.concatenate([r.copy(), v.copy()]))
-            a_thrust = self.boost_thrust / max(m, 1e-6) * v_unit
-            a_grav = -MU_EARTH / np.linalg.norm(r) ** 3 * r
-            # Simple exponential atmosphere drag (valid to ~20 km).
-            alt = np.linalg.norm(r) - R_EARTH
-            rho = 1.225 * np.exp(-max(alt, 0.0) / 8500.0)
-            q_dyn = 0.5 * rho * vmag ** 2
-            a_drag = -q_dyn * 0.3 / max(m, 1e-6) * v_unit  # Cd*A/m ~ 0.3 m^2/kg
-            a = a_grav + a_thrust + a_drag
-            v = v + a * dt
-            r = r + v * dt
+            r, v = _rk4_step(r, v, dt, boost_accel)
             mdot = self.boost_thrust / (self.isp * 9.81)
             m = max(m - mdot * dt, self.mass_final)
             vmag = np.linalg.norm(v)
@@ -733,10 +757,10 @@ class CruiseMissileScenario:
         dive_angle = np.radians(self.terminal_dive_angle_deg)
         dive_t = np.arange(0.0, 60.0, dt)
         dive_states = []
-        for _ in dive_t:
-            dive_states.append(np.concatenate([r_cruise.copy(), cruise_v.copy()]))
-            radial = r_cruise / np.linalg.norm(r_cruise)
-            horiz = cruise_v - np.dot(cruise_v, radial) * radial
+
+        def dive_accel(r, v):
+            radial = r / max(np.linalg.norm(r), 1e-9)
+            horiz = v - np.dot(v, radial) * radial
             hnorm = np.linalg.norm(horiz)
             if hnorm > 1e-6:
                 horiz = horiz / hnorm
@@ -745,13 +769,16 @@ class CruiseMissileScenario:
                 hnorm = np.linalg.norm(horiz)
                 if hnorm > 1e-6:
                     horiz = horiz / hnorm
+                else:
+                    horiz = np.array([1.0, 0.0, 0.0])
             dive_v = horiz * np.cos(dive_angle) + radial * (-np.sin(dive_angle))
-            dive_v = dive_v / np.linalg.norm(dive_v) * cruise_speed
-            a_grav = -MU_EARTH / np.linalg.norm(r_cruise) ** 3 * r_cruise
-            v = cruise_v + (a_grav + dive_v * 3.0) * dt
-            r = r_cruise + v * dt
-            r_cruise = r
-            cruise_v = v
+            dive_v = dive_v / max(np.linalg.norm(dive_v), 1e-9) * cruise_speed
+            a_grav = _two_body_accel(r, use_j2=True)
+            return a_grav + dive_v * 3.0
+
+        for _ in dive_t:
+            dive_states.append(np.concatenate([r_cruise.copy(), cruise_v.copy()]))
+            r_cruise, cruise_v = _rk4_step(r_cruise, cruise_v, dt, dive_accel)
 
         all_t = np.concatenate([
             t_boost,

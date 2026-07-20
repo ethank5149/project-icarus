@@ -267,19 +267,39 @@ class Atmosphere:
             self.exo.lon = lon
 
     def density(self, h):
+        h = np.asarray(h, dtype=float)
         return self._regime_value(h, "density")
 
+    def density_scalar(self, h):
+        return self._regime_value_scalar(h, "density")
+
     def temperature(self, h):
+        h = np.asarray(h, dtype=float)
         return self._regime_value(h, "temperature")
 
+    def temperature_scalar(self, h):
+        return self._regime_value_scalar(h, "temperature")
+
     def pressure(self, h):
+        h = np.asarray(h, dtype=float)
         return self._regime_value(h, "pressure")
 
+    def pressure_scalar(self, h):
+        return self._regime_value_scalar(h, "pressure")
+
     def speed_of_sound(self, h):
+        h = np.asarray(h, dtype=float)
         return self._regime_value(h, "speed_of_sound")
 
+    def speed_of_sound_scalar(self, h):
+        return self._regime_value_scalar(h, "speed_of_sound")
+
     def dynamic_viscosity(self, h):
+        h = np.asarray(h, dtype=float)
         return self._regime_value(h, "dynamic_viscosity")
+
+    def dynamic_viscosity_scalar(self, h):
+        return self._regime_value_scalar(h, "dynamic_viscosity")
 
     def _regime_value(self, h, attr):
         h = np.asarray(h, dtype=float)
@@ -290,6 +310,19 @@ class Atmosphere:
         taper_high = self.boundary_alt + self.taper_width
 
         blend = np.clip((h - taper_low) / (taper_high - taper_low), 0.0, 1.0)
+        blend = 0.5 * (1.0 - np.cos(np.pi * blend))
+
+        return endo_val * (1.0 - blend) + exo_val * blend
+
+    def _regime_value_scalar(self, h, attr):
+        h = float(h)
+        endo_val = float(getattr(self.endo, attr)(np.array([h]))[0])
+        exo_val = float(getattr(self.exo, attr)(np.array([h]))[0])
+
+        taper_low = self.boundary_alt - self.taper_width
+        taper_high = self.boundary_alt + self.taper_width
+
+        blend = max(0.0, min(1.0, (h - taper_low) / (taper_high - taper_low)))
         blend = 0.5 * (1.0 - np.cos(np.pi * blend))
 
         return endo_val * (1.0 - blend) + exo_val * blend

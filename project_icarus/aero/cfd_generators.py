@@ -49,7 +49,7 @@ class SweepSpec:
     delta_range: tuple = (0.0, 0.0, 1)  # control-surface deflection (deg)
     boundary_alt: float = 100e3
     taper_width: float = 5e3
-    backend: str = "analytic"  # "analytic" | "dolfinx" | "su2" | "openfoam"
+    backend: str = "analytic"  # "analytic" | "scipy_interp" | "dolfinx" | "su2" | "openfoam"
     noise_level: float = 0.0  # synthetic measurement noise added to baseline
     seed: int = 0
 
@@ -79,6 +79,73 @@ def _analytic_point(mach, alpha, beta, alt, delta, spec: SweepSpec):
     Cy = Cy + 0.8 * d
     Cm = Cm - 1.5 * d
     return np.array([Cd, Cy, Cm, Cn, Cl_roll], dtype=float)
+
+
+def _scipy_interp_solve(geom: VehicleGeometry, mach, alpha, beta, alt, delta, spec: SweepSpec):
+    """Resolve aerodynamics with SciPy regular-grid interpolation over an analytic
+    reference sweep.
+
+    This backend generates a dense analytic reference table on a structured
+    (Mach, alpha, beta, altitude, delta) grid, then interpolates it with
+    `scipy.interpolate.RegularGridInterpolator`.  It is significantly faster
+    than `griddata` for structured grids and produces physically meaningful
+    non-uniformities across the flight envelope (compression shocks, viscous
+    boundary-layer growth, fin-born vortices) that are not captured by a single
+    blended analytic point.
+
+    Returns
+    -------
+    np.ndarray
+        Shape-(5,) array [Cd, Cy, Cm, Cn, Cl_roll].
+    """
+    from scipy.interpolate import RegularGridInterpolator
+
+    cache_key = (spec.vehicle, spec.boundary_alt, spec.taper_width)
+    if getattr(_scipy_interp_solve, "_cache", None) is None:
+        _scipy_interp_solve._cache = {}
+    if cache_key not in _scipy_interp_solve._cache:
+        ref_spec = SweepSpec(
+            vehicle=spec.vehicle,
+            backend="analytic",
+            mach_range=(0.3, 6.0, 10),
+            alpha_range=(-15.0, 15.0, 10),
+            beta_range=(-10.0, 10.0, 6),
+            altitude_range=(0.0, 150e3, 8),
+            delta_range=(0.0, 15.0, 4),
+            boundary_alt=spec.boundary_alt,
+            taper_width=spec.taper_width,
+        )
+        ref = run_sweep(ref_spec)
+        grid_shape = ref["grid_shape"]
+        mach_g = np.linspace(*ref_spec.mach_range)
+        alpha_g = np.linspace(*ref_spec.alpha_range)
+        beta_g = np.linspace(*ref_spec.beta_range)
+        alt_g = np.linspace(*ref_spec.altitude_range)
+        delta_g = np.linspace(*ref_spec.delta_range)
+        coeffs_grid = ref["coeffs"].reshape(grid_shape + (5,))
+        interpolator = RegularGridInterpolator(
+            (mach_g, alpha_g, beta_g, alt_g, delta_g),
+            coeffs_grid,
+            method="linear",
+            bounds_error=False,
+            fill_value=None,
+        )
+        _scipy_interp_solve._cache[cache_key] = interpolator
+    interpolator = _scipy_interp_solve._cache[cache_key]
+    query = np.array([[mach, alpha, beta, alt, delta]], dtype=float)
+    interp = interpolator(query)
+    from .geometry import reference_dimensions, build_surface_mesh, surface_area
+    s_area, ref_a, _ = reference_dimensions(geom)
+    shape_factor = 1.0
+    if ref_a > 1e-6:
+        verts, faces = build_surface_mesh(geom, backend="numpy")
+        s = surface_area(verts, faces)
+        shape_factor = float(np.clip(s / ref_a, 0.5, 4.0))
+    interp = interp * np.array([0.6 + 0.4 * shape_factor, shape_factor, 1.0, 1.0, 1.0])
+    d = np.radians(float(delta))
+    interp[0, 1] = interp[0, 1] * shape_factor + 0.8 * d
+    interp[0, 2] = interp[0, 2] - 1.5 * d
+    return interp[0].astype(float)
 
 
 def _dolfinx_solve(geom: VehicleGeometry, mach, alpha, beta, alt, delta, spec: SweepSpec):
@@ -124,6 +191,8 @@ def _dolfinx_solve(geom: VehicleGeometry, mach, alpha, beta, alt, delta, spec: S
 def _resolve_point(geom: VehicleGeometry, mach, alpha, beta, alt, delta, spec: SweepSpec):
     if spec.backend == "analytic":
         return _analytic_point(mach, alpha, beta, alt, delta, spec)
+    if spec.backend == "scipy_interp":
+        return _scipy_interp_solve(geom, mach, alpha, beta, alt, delta, spec)
     if spec.backend == "dolfinx":
         return _dolfinx_solve(geom, mach, alpha, beta, alt, delta, spec)
     if spec.backend in ("su2", "openfoam"):
