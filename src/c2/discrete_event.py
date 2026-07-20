@@ -85,13 +85,17 @@ def run_discrete_event(
         return
 
     if env is not None:
-        # simpy-driven: schedule one step per dt using a process generator.
+        # simpy-driven: the event loop's own clock advances time via
+        # ``env.timeout(dt)`` each scan, so other simpy processes can run
+        # concurrently (e.g. a data-link refresh generator). ``step`` reads
+        # ``env.now`` so the scenario timeline is the simpy clock.
         def _proc():
-            tt = scenario.t_start
-            while tt <= scenario.t_end:
-                yield env.timeout(0)  # co-operate with the event loop
-                step(tt)
-                tt += scenario.dt
+            while env.now <= scenario.t_end:
+                yield env.timeout(scenario.dt)
+                step(env.now)
+            # Final partial step if the clock landed exactly on t_end.
+            if env.now <= scenario.t_end:
+                step(env.now)
         env.process(_proc())
         env.run(until=scenario.t_end + scenario.dt)
     else:

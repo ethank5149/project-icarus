@@ -140,6 +140,11 @@ class BattleManagerConfig:
     # discrete-event loop delays engagement assessment by this much relative to
     # track confirmation.
     c2_latency_s: float = 2.0
+    # Distributed-C2 cue latency (space warning + ground handoff) in seconds.
+    # Used by ``BattleManager.run`` to skip the first rounds of the shoot-look-
+    # shoot loop until the C2 chain has cued a battery (see ``run`` /
+    # ``distributed_handoff``).
+    round_interval_s: float = 20.0  # assumed engagement time per SLS round
     # Data-link refresh cadence (s): how often a confirmed track is re-handled
     # for re-allocation / shoot-look-shoot re-evaluation.
     datalink_update_s: float = 4.0
@@ -183,7 +188,8 @@ class BattleManager:
         return greedy_allocate(self.threats, self.batteries, self._location,
                                salvo_size=self.cfg.salvo_size)
 
-    def run(self, assess: Callable[[ThreatTrack, int], float]) -> "BattleResult":
+    def run(self, assess: Callable[[ThreatTrack, int], float],
+             cue_latency_s: float = 0.0) -> "BattleResult":
         """Execute the engagement doctrine.
 
         ``assess(threat, battery_index)`` returns the miss distance (m) for the
@@ -191,12 +197,37 @@ class BattleManager:
         fires according to doctrine, marks threats defeated when a shot lands
         within the applicable kill radius, and stops early once all threats are
         resolved or rounds are exhausted.
+
+        Parameters
+        ----------
+        assess : callable
+            Per-shot miss-distance callback (contract as above).
+        cue_latency_s : float
+            Distributed-C2 cue latency (space warning + ground handoff) in
+            seconds. Threats are not engaged until this latency has elapsed; it is
+            modelled by skipping the first rounds of the shoot-look-shoot loop
+            proportional to ``cue_latency_s / round_interval_s`` (see
+            ``BattleManagerConfig``). This lets a saturation raid reach a defended
+            point before the battery is tasked, exactly as the distributed-handoff
+            diagnostics imply.
         """
         # Snapshot capacity for utilization reporting.
         for bat in self.batteries:
             bat._capacity = bat.magazine
         results: List[Dict[str, Any]] = []
+        # Rounds to skip while the C2 cue latency elapses. Each round is assumed
+        # to span ``round_interval_s`` of engagement time (default 20 s). The
+        # latency is taken as the max of the caller-supplied value and any
+        # per-threat ``_cue_latency_s`` set by the distributed-handoff chain.
+        round_interval = getattr(self.cfg, "round_interval_s", 20.0)
+        cue = float(cue_latency_s)
+        for t in self.threats:
+            cue = max(cue, float(getattr(t, "_cue_latency_s", 0.0) or 0.0))
+        skip_rounds = int(np.ceil(cue / round_interval)) if round_interval > 0 else 0
         for _round in range(self.cfg.max_rounds):
+            if _round < skip_rounds:
+                # C2 chain still cueing; no battery tasking yet.
+                continue
             active = [t for t in self.threats if not t.defeated]
             if not active:
                 break

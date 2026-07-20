@@ -9,6 +9,16 @@ from .battle_manager import (
 )
 from .campaign import run_campaign, CampaignThreat, CampaignResult
 from .discrete_event import run_discrete_event, C2Scenario
+from .layers import (
+    Tier,
+    Layer,
+    DefenseArchitecture,
+    SpaceSensor,
+    DistributedC2Config,
+    build_architecture_from_locations,
+    distributed_handoff,
+    run_layered_campaign,
+)
 
 __all__ = [
     "BattleManager",
@@ -23,4 +33,12 @@ __all__ = [
     "CampaignResult",
     "run_discrete_event",
     "C2Scenario",
+    "Tier",
+    "Layer",
+    "DefenseArchitecture",
+    "SpaceSensor",
+    "DistributedC2Config",
+    "build_architecture_from_locations",
+    "distributed_handoff",
+    "run_layered_campaign",
 ]

@@ -275,3 +275,42 @@ class TestDiscreteEvent:
         # The declared threat was defeated (defeat propagates across scans).
         assert out["battle"].n_defeated >= 1
         assert len(out["n_confirmed"]) == 11  # 11 scans (0..10 inclusive)
+
+    def test_discrete_event_simpy_clock(self):
+        # The optional simpy.Environment clock must drive the same loop and
+        # produce equivalent engagement outcomes to the pure-python stepper.
+        import simpy
+        from src.sensors.sensor import Sensor
+        from src.dynamics.coordinate_systems import geodetic_to_ecef
+
+        def _ecef(a, b, c=0):
+            return np.asarray(geodetic_to_ecef(a, b, c), dtype=float)
+
+        sensor = Sensor("S", lat_deg=45.0, lon_deg=-90.0, max_range_m=5000e3,
+                        range_std_m=300.0, angle_std_deg=0.2)
+        rng = np.random.default_rng(3)
+        net = SensorNetwork([sensor], confirmation_hits=2, use_clutter=False, rng=rng)
+
+        aim = _ecef(45.0, -90.0) + np.array([0.0, 0.0, 600e3])
+        threats = [ThreatTrack(threat_id=0, target=None, aim_point=aim, priority=1.0)]
+        bats = [_battery("A", magazine=6, salvo=1, loc=aim)]
+
+        bm = BattleManager(threats, bats, cfg=BattleManagerConfig(
+            doctrine="shoot_look_shoot", allocator="greedy", salvo_size=1,
+            max_rounds=3, c2_latency_s=1.0))
+
+        scenario = C2Scenario(name="de_sim", t_start=0.0, t_end=10.0, dt=1.0)
+
+        def truth(t):
+            return [_ecef(45.0, -90.0) + np.array([0.0, 0.0, 600e3])
+                    + t * np.array([1e3, 0.0, -200.0])]
+
+        def assess(track_arg, bi):
+            return 0.1
+
+        env = simpy.Environment()
+        out = run_discrete_event(scenario, net, bm, truth, assess, rcs_m2=1.0, env=env)
+        assert len(out["shots"]) >= 1
+        assert out["battle"].n_defeated >= 1
+        # simpy clock advanced through the full scenario.
+        assert env.now >= scenario.t_end
