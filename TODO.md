@@ -2,3 +2,6 @@
 - Add tests that assert (each type of) targets accurately reach their target when unintercepted for simulation robustness.
 - Thoroughly inspect entire codebase for potential efficiency improvements (more advanced algorithms, parallelization, vectorization, etc), make sure to intelligently and creatively utilize existing nvidia gpu hardware.
 - Implement physically accurate (CAD) models for each interceptor and target vehicle in the library for CFD data generation.
+- Consider NRLMSISE-2.1 atmospheric density model.
+- Ingest GMTED2010 global surface elevation data in reference dir for use in a LUT or interpolator for better accuracy
+- add tests for all mathematical calulations asserted by physically accurate and confirmed answers (geometry/geodetic calculations, conservation of energy/momentum in appropriate regimes, etc.)

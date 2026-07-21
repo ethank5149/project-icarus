@@ -21,6 +21,27 @@ MU_EARTH = 3.986004418e14
 R_EARTH = 6371e3
 J2_EARTH = 1.08263e-3
 
+_WGS84_A = 6378137.0
+_WGS84_F = 1.0 / 298.257223563
+_WGS84_B = _WGS84_A * (1.0 - _WGS84_F)
+_WGS84_E2 = (_WGS84_A**2 - _WGS84_B**2) / _WGS84_A**2
+
+
+def _wgs84_radius(r):
+    """Compute the WGS84 ellipsoid radius at the given ECEF position."""
+    x, y, z = np.asarray(r, dtype=float)
+    p = np.sqrt(x**2 + y**2)
+    if p < 1e-6:
+        return _WGS84_B if z > 0 else _WGS84_B
+    lat = np.arctan2(z, p)
+    N = _WGS84_A / np.sqrt(1.0 - _WGS84_E2 * np.sin(lat)**2)
+    return N * np.sqrt(np.cos(lat)**2 + ((1.0 - _WGS84_E2) * np.sin(lat))**2)
+
+
+def _ground_altitude(r):
+    """Compute altitude above WGS84 ellipsoid (meters)."""
+    return float(np.linalg.norm(np.asarray(r, dtype=float)) - _wgs84_radius(r))
+
 
 def _two_body_accel(r, use_j2=True, use_j3=False, use_j4=False,
                      use_high_order=False, use_third_body=False, use_tides=False,
@@ -133,22 +154,39 @@ except Exception:
     NUMBA_PROPAGATORS_AVAILABLE = False
 
 def _ecef_to_geodetic(r):
-    x, y, z = r
+    """Convert ECEF to WGS84 geodetic coordinates."""
+    x, y, z = np.asarray(r, dtype=float)
     lon = np.degrees(np.arctan2(y, x))
-    lat = np.degrees(np.arctan2(z, np.sqrt(x**2 + y**2)))
-    alt = np.linalg.norm(r) - R_EARTH
-    return float(lat), float(lon), float(alt)
+    p = np.sqrt(x**2 + y**2)
+    if p < 1e-6:
+        lat = 90.0 if z > 0 else -90.0
+        return float(lat), float(lon), float(abs(z) - _WGS84_B)
+    b = _WGS84_B
+    e_prime2 = _WGS84_E2 / (1.0 - _WGS84_E2)
+    theta = np.arctan2(z * _WGS84_A, p * b)
+    lat = np.arctan2(
+        z + e_prime2 * b * np.sin(theta)**3,
+        p - _WGS84_E2 * _WGS84_A * np.cos(theta)**3,
+    )
+    sin_lat = np.sin(lat)
+    N = _WGS84_A / np.sqrt(1.0 - _WGS84_E2 * sin_lat**2)
+    alt = p / np.cos(lat) - N
+    return float(np.degrees(lat)), float(lon), float(alt)
 
 
 def _geodetic_to_ecef_simple(lat_deg, lon_deg, alt_m=0.0):
+    """Convert geodetic to ECEF using WGS84 ellipsoid."""
     lat = np.radians(lat_deg)
     lon = np.radians(lon_deg)
-    r = R_EARTH + alt_m
-    return np.array([
-        r * np.cos(lat) * np.cos(lon),
-        r * np.cos(lat) * np.sin(lon),
-        r * np.sin(lat),
-    ])
+    sin_lat = np.sin(lat)
+    cos_lat = np.cos(lat)
+    sin_lon = np.sin(lon)
+    cos_lon = np.cos(lon)
+    N = _WGS84_A / np.sqrt(1.0 - _WGS84_E2 * sin_lat**2)
+    x = (N + alt_m) * cos_lat * cos_lon
+    y = (N + alt_m) * cos_lat * sin_lon
+    z = (N * (1.0 - _WGS84_E2) + alt_m) * sin_lat
+    return np.array([x, y, z])
 
 
 def _destination_point(lat_deg, lon_deg, az_deg, dist_deg):
@@ -157,6 +195,10 @@ def _destination_point(lat_deg, lon_deg, az_deg, dist_deg):
     lon1 = np.radians(lon_deg)
     az = np.radians(az_deg)
     d = np.radians(dist_deg)
+    lat2 = np.arcsin(np.sin(lat1) * np.cos(d) + np.cos(lat1) * np.sin(d) * np.cos(az))
+    lon2 = lon1 + np.arctan2(np.sin(az) * np.sin(d) * np.cos(lat1),
+                              np.cos(d) - np.sin(lat1) * np.sin(lat2))
+    return float(np.degrees(lat2)), float(np.degrees(lon2))
     lat2 = np.arcsin(
         np.sin(lat1) * np.cos(d) + np.cos(lat1) * np.sin(d) * np.cos(az)
     )
@@ -257,7 +299,7 @@ def simulate_guided_threat(
     # stepper (RK45) takes large steps in vacuum and refines them automatically
     # only inside the atmosphere, so no hand-rolled step-count guard is needed.
     def _ground_event(t, y):
-        return np.linalg.norm(y[:3]) - R_EARTH
+        return _ground_altitude(y[:3])
 
     _ground_event.terminal = True
     _ground_event.direction = -1
@@ -312,20 +354,34 @@ class BallisticScenario:
     use_tides: bool = False
     max_degree: int = 10
     adaptive: bool = False
+    ballistic_coeff: float = 100.0
+    cd: float = 0.3
+    area: float = 0.02
+    mass: float = 1000.0
+    atmosphere: Optional[Atmosphere] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self):
+        if self.atmosphere is None:
+            self.atmosphere = Atmosphere()
+
     def _accel(self, r, v):
-        return _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
-                               use_j4=self.use_j4, use_high_order=self.use_high_order,
-                               use_third_body=self.use_third_body, use_tides=self.use_tides,
-                               max_degree=self.max_degree)
+        r = np.asarray(r, dtype=float)
+        v = np.asarray(v, dtype=float)
+        vmag = np.linalg.norm(v)
+        a_grav = _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
+                                 use_j4=self.use_j4, use_high_order=self.use_high_order,
+                                 use_third_body=self.use_third_body, use_tides=self.use_tides,
+                                 max_degree=self.max_degree)
+        a_drag = np.zeros(3)
+        alt = _ground_altitude(r)
+        if 0.0 < alt < 100e3 and vmag > 1e-6:
+            rho = self.atmosphere.density_scalar(alt)
+            q_dyn = 0.5 * rho * vmag**2
+            a_drag = -q_dyn * self.cd * self.area / self.mass * (v / vmag)
+        return a_grav + a_drag
 
     def propagate(self, t: float) -> np.ndarray:
-        if self.adaptive or self.use_j3 or self.use_j4 or self.use_third_body or self.use_tides:
-            return self._propagate_integrated(t)
-        return _kepler_propagate(self.r0.astype(float), self.v0.astype(float), t, MU_EARTH)
-
-    def _propagate_integrated(self, t: float) -> np.ndarray:
         r = self.r0.astype(float).copy()
         v = self.v0.astype(float).copy()
         y0 = np.concatenate([r, v])
@@ -336,7 +392,7 @@ class BallisticScenario:
             return np.concatenate([v, a])
 
         def ground_event(ti, y):
-            return np.linalg.norm(y[:3]) - R_EARTH
+            return _ground_altitude(y[:3])
         ground_event.terminal = True
         ground_event.direction = -1
 
@@ -353,11 +409,7 @@ class BallisticScenario:
 
     def propagate_batch(self, times: np.ndarray) -> np.ndarray:
         times = np.asarray(times, dtype=float)
-        if self.adaptive or self.use_j3 or self.use_j4 or self.use_third_body or self.use_tides:
-            return np.array([self._propagate_integrated(ti) for ti in times])
-        r0 = self.r0.astype(float)
-        v0 = self.v0.astype(float)
-        return np.array([_kepler_propagate(r0, v0, ti, MU_EARTH) for ti in times])
+        return np.array([self.propagate(ti) for ti in times])
 
 
 def _kepler_propagate(r0, v0, t, mu):
@@ -441,7 +493,7 @@ class FOBSScenario:
     _boost_duration: float = 120.0
     _coast_duration: float = 600.0
     _reentry_alt: float = 100e3
-    deorbit_dv: float = 0.15
+    deorbit_dv: float = 1.0
     vehicle: Any = None
     guidance: Any = None
     use_j2: bool = True
@@ -483,76 +535,110 @@ class FOBSScenario:
     def _full_trajectory(self):
         if self._cache is not None:
             return self._cache
-        # Boost + coast modeled as an impulsive transfer onto the parking orbit
-        # (r0, v0) using Keplerian two-body propagation up to the coast end, then
-        # a retrograde deorbit burn at the coast-end point. This places the reentry
-        # start at the correct apogee altitude rather than the unphysical
-        # forward-Euler boost endpoint.
-        dt_boost = 0.5
-        boost_t = np.arange(0.0, self._boost_duration + dt_boost, dt_boost)
-        boost_states = []
-        r = self.r0.astype(float).copy()
-        v = self.v0.astype(float).copy()
-        for _ in boost_t:
+
+        # ------------------------------------------------------------------
+        # Phase 1: Boost to parking orbit altitude
+        # ------------------------------------------------------------------
+        if abs(self.thrust) > 1e-6 and self._boost_duration > 0:
+            dt_boost = 0.05
+            boost_t = np.arange(0.0, self._boost_duration + dt_boost, dt_boost)
+            boost_states = []
+            r = self.r0.astype(float).copy()
+            v = self.v0.astype(float).copy()
+            for _ in boost_t:
+                boost_states.append(np.concatenate([r.copy(), v.copy()]))
+                a = _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
+                                    use_j4=self.use_j4, use_high_order=self.use_high_order,
+                                    use_third_body=self.use_third_body, use_tides=self.use_tides,
+                                    max_degree=self.max_degree) + np.array([self.thrust, 0.0, 0.0])
+                v = v + a * dt_boost
+                r = r + v * dt_boost
             boost_states.append(np.concatenate([r.copy(), v.copy()]))
+            r_coast = boost_states[-1][:3].copy()
+            v_coast = boost_states[-1][3:].copy()
+            t0_coast = self._boost_duration
+        else:
+            boost_states = [np.concatenate([self.r0.astype(float).copy(), self.v0.astype(float).copy()])]
+            r_coast = self.r0.astype(float).copy()
+            v_coast = self.v0.astype(float).copy()
+            t0_coast = 0.0
+            boost_t = np.array([0.0])
+
+        # ------------------------------------------------------------------
+        # Phase 2: Coast in parking orbit (circular LEO)
+        # ------------------------------------------------------------------
+        r_i = np.linalg.norm(r_coast)
+        v_circular = np.sqrt(MU_EARTH / r_i)
+        v_coast_dir = v_coast / max(np.linalg.norm(v_coast), 1e-12)
+        v_coast = v_coast_dir * v_circular
+
+        y0_coast = np.concatenate([r_coast, v_coast])
+
+        def rhs_coast(ti, y):
+            r, v = y[:3], y[3:]
             a = _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
                                 use_j4=self.use_j4, use_high_order=self.use_high_order,
                                 use_third_body=self.use_third_body, use_tides=self.use_tides,
-                                max_degree=self.max_degree) + np.array([self.thrust, 0.0, 0.0])
-            v = v + a * dt_boost
-            r = r + v * dt_boost
-        boost_states.append(np.concatenate([r.copy(), v.copy()]))
-
-        # Coast: Keplerian two-body propagation from the boost-end state.
-        r_coast = boost_states[-1][:3].copy()
-        v_coast = boost_states[-1][3:].copy()
-        dt_coast = 0.5
-        coast_t = np.arange(0.0, self._coast_duration + dt_coast, dt_coast)
-        coast_states = []
-        rc, vc = r_coast.copy(), v_coast.copy()
-        for _ in coast_t:
-            coast_states.append(np.concatenate([rc.copy(), vc.copy()]))
-            a = _two_body_accel(rc, use_j2=self.use_j2, use_j3=self.use_j3,
-                                use_j4=self.use_j4, use_high_order=self.use_high_order,
-                                use_third_body=self.use_third_body, use_tides=self.use_tides,
                                 max_degree=self.max_degree)
-            vc = vc + a * dt_coast
-            rc = rc + vc * dt_coast
-        coast_states.append(np.concatenate([rc.copy(), vc.copy()]))
+            return np.concatenate([v, a])
 
-        # Deorbit: the FOBS loiters in a parking orbit at the apogee altitude,
-        # then performs a retrograde burn that drops perigee onto the aim point.
-        # The deorbit state is placed on a near-collision course with the aim
-        # point (velocity directed toward the aim, with a small retrograde
-        # component so the trajectory actually enters the atmosphere). PN
-        # guidance then trims the residual error during the guided reentry.
-        r_park = R_EARTH + self.apoapsis_km * 1e3
-        v_park = np.sqrt(MU_EARTH / r_park)
+        dt_coast = 0.05
+        coast_t_eval = np.arange(0.0, self._coast_duration + dt_coast, dt_coast)
+        sol_coast = solve_ivp(rhs_coast, (0.0, self._coast_duration), y0_coast,
+                              method="RK45", t_eval=coast_t_eval,
+                              rtol=1e-9, atol=1e-12)
+        coast_states = sol_coast.y.T if sol_coast.y.size > 0 else np.array([y0_coast])
 
-        # Deorbit position: a parking-orbit point sampled along the launch
-        # azimuth so that a burn aimed at the aim point yields a closing geometry.
-        rhat = self.r0 / max(np.linalg.norm(self.r0), 1e-6)
-        r_deorbit = r_park * rhat
+        # ------------------------------------------------------------------
+        # Phase 3: Deorbit burn (retrograde impulse at apogee)
+        # ------------------------------------------------------------------
+        r_deorbit = coast_states[-1][:3].copy()
+        v_deorbit_circular = coast_states[-1][3:].copy()
+        v_deorbit_dir = v_deorbit_circular / max(np.linalg.norm(v_deorbit_circular), 1e-12)
 
-        # Velocity on a collision course toward the aim point, scaled to the
-        # parking speed and reduced by the retrograde deorbit fraction so the RV
-        # leaves orbit and descends. The aim point is on the surface, so this
-        # naturally carries a downward component.
+        r_a = np.linalg.norm(r_deorbit)
+        r_p = R_EARTH + 80e3
+        a_t = (r_a + r_p) / 2.0
+        v_a = np.sqrt(MU_EARTH * (2.0 / r_a - 1.0 / a_t))
+        delta_v = v_circular - v_a
+
+        retrograde_dir = -v_deorbit_dir
         to_aim = self._aim_point - r_deorbit
         to_aim_unit = to_aim / max(np.linalg.norm(to_aim), 1e-6)
-        v_deorbit = v_park * (1.0 - self.deorbit_dv) * to_aim_unit
 
+        orbital_plane_normal = np.cross(r_deorbit, v_deorbit_circular)
+        orbital_plane_normal = orbital_plane_normal / max(np.linalg.norm(orbital_plane_normal), 1e-12)
+        to_aim_in_plane = to_aim_unit - np.dot(to_aim_unit, orbital_plane_normal) * orbital_plane_normal
+        to_aim_in_plane_norm = np.linalg.norm(to_aim_in_plane)
+        if to_aim_in_plane_norm > 1e-6:
+            to_aim_in_plane = to_aim_in_plane / to_aim_in_plane_norm
+        else:
+            to_aim_in_plane = retrograde_dir
+
+        burn_dir = 0.6 * retrograde_dir + 0.4 * to_aim_in_plane
+        burn_dir = burn_dir / max(np.linalg.norm(burn_dir), 1e-12)
+        v_deorbit = v_deorbit_circular + burn_dir * delta_v * self.deorbit_dv
+
+        # Entry interface conditions
+        r_EI = R_EARTH + 100e3
+        v_EI = np.sqrt(v_a**2 + 2.0 * MU_EARTH * (1.0 / r_EI - 1.0 / r_a))
+        cos_gamma_EI = (r_a * v_a) / (r_EI * v_EI)
+        gamma_EI = -np.arccos(np.clip(cos_gamma_EI, -1.0, 1.0))
+
+        # ------------------------------------------------------------------
+        # Phase 4: Guided reentry using PN guidance
+        # ------------------------------------------------------------------
         guided_times, guided_states = simulate_guided_threat(
             r_deorbit, v_deorbit, self._aim_point,
             vehicle=self.vehicle, guidance_law=self.guidance,
-            t0=self._boost_duration + self._coast_duration,
+            t0=t0_coast + self._coast_duration,
             t_end=self.metadata.get("engagement_end", 1200.0),
         )
 
-        all_t = np.concatenate([boost_t, self._boost_duration + coast_t, guided_times])
+        all_t = np.concatenate([boost_t, t0_coast + coast_t_eval, guided_times])
         all_s = np.concatenate([
             np.array(boost_states),
-            np.array(coast_states),
+            coast_states,
             guided_states.T,
         ], axis=0)
         self._cache = (all_t, all_s)
@@ -560,6 +646,8 @@ class FOBSScenario:
 
     def propagate(self, t: float) -> np.ndarray:
         all_t, all_s = self._full_trajectory()
+        if t >= all_t[-1]:
+            return all_s[-1]
         idx = int(np.searchsorted(all_t, t))
         idx = min(max(idx, 1), len(all_t) - 1)
         t0, t1 = all_t[idx - 1], all_t[idx]
@@ -633,7 +721,7 @@ class HGVScenario:
                                  use_j4=self.use_j4, use_high_order=self.use_high_order,
                                  use_third_body=self.use_third_body, use_tides=self.use_tides,
                                  max_degree=self.max_degree)
-        alt = np.linalg.norm(r) - R_EARTH
+        alt = _ground_altitude(r)
         a_drag = np.zeros(3)
         a_lift = np.zeros(3)
         if 0.0 < alt < 150e3:
@@ -656,7 +744,7 @@ class HGVScenario:
             return np.concatenate([v, a])
 
         def ground_event(ti, y):
-            return np.linalg.norm(y[:3]) - R_EARTH
+            return _ground_altitude(y[:3])
         ground_event.terminal = True
         ground_event.direction = -1
 
@@ -684,7 +772,7 @@ class HGVScenario:
             return np.concatenate([v, a])
 
         def ground_event(ti, y):
-            return np.linalg.norm(y[:3]) - R_EARTH
+            return _ground_altitude(y[:3])
         ground_event.terminal = True
         ground_event.direction = -1
 
@@ -711,7 +799,7 @@ class HGVScenario:
             return np.concatenate([v, a])
 
         def ground_event(ti, y):
-            return np.linalg.norm(y[:3]) - R_EARTH
+            return _ground_altitude(y[:3])
         ground_event.terminal = True
         ground_event.direction = -1
 
@@ -740,8 +828,8 @@ class SuppressedScenario:
     r0: np.ndarray = field(default_factory=lambda: np.zeros(3))
     v0: np.ndarray = field(default_factory=lambda: np.zeros(3))
     dip_alt_km: float = 50.0
-    midcourse_maneuver_mag: float = 50.0
-    maneuver_interval: float = 30.0
+    midcourse_maneuver_mag: float = 5.0
+    maneuver_interval: float = 60.0
     use_j2: bool = True
     use_j3: bool = False
     use_j4: bool = False
@@ -773,42 +861,77 @@ class SuppressedScenario:
         v = self.v0.astype(float).copy()
         y0 = np.concatenate([r, v])
 
-        def rhs(ti, y):
+        def _ground_event(ti, y):
+            return _ground_altitude(y[:3])
+        _ground_event.terminal = True
+        _ground_event.direction = -1
+
+        def _rhs(ti, y):
             r, v = y[:3], y[3:]
             a = self._accel(r, v)
             return np.concatenate([v, a])
 
-        def ground_event(ti, y):
-            return np.linalg.norm(y[:3]) - R_EARTH
-        ground_event.terminal = True
-        ground_event.direction = -1
+        maneuver_times = []
+        if t > 60.0:
+            dt = 0.5
+            for k in range(int(t / dt)):
+                tc = (k + 1) * dt
+                if tc > 60.0:
+                    m = int(tc / self.maneuver_interval)
+                    if m % 2 == 0:
+                        maneuver_times.append(tc)
+            maneuver_times = np.array(maneuver_times)
+            maneuver_times = maneuver_times[maneuver_times <= t]
 
-        sol = solve_ivp(rhs, (0.0, t), y0, method="RK45",
-                        rtol=1e-6, atol=1e-9, max_step=5.0,
-                        events=ground_event, dense_output=True)
+        current_y = y0.copy()
+        t_current = 0.0
+
+        for maneuver_t in maneuver_times:
+            if maneuver_t > t:
+                break
+            alt_before = np.linalg.norm(current_y[:3]) - R_EARTH
+            if alt_before < 100e3:
+                break
+            sol = solve_ivp(
+                _rhs,
+                (t_current, maneuver_t),
+                current_y,
+                method="RK45",
+                rtol=1e-6, atol=1e-9,
+                dense_output=True,
+            )
+            current_y = sol.y[:, -1].copy()
+            v_curr = current_y[3:6]
+            v_mag = np.linalg.norm(v_curr)
+            if v_mag > 1e-6:
+                v_dir = v_curr / v_mag
+                r_curr = current_y[:3]
+                r_mag = np.linalg.norm(r_curr)
+                if r_mag > 1e-6:
+                    r_dir = r_curr / r_mag
+                    lateral = np.cross(r_dir, v_dir)
+                    lateral_mag = np.linalg.norm(lateral)
+                    if lateral_mag > 1e-6:
+                        lateral = lateral / lateral_mag
+                        current_y[3:6] = v_curr + self.midcourse_maneuver_mag * lateral
+            t_current = maneuver_t
+
+        sol = solve_ivp(
+            _rhs,
+            (t_current, t),
+            current_y,
+            method="RK45",
+            rtol=1e-6, atol=1e-9,
+            events=[_ground_event],
+            dense_output=True,
+        )
         if sol.t_events[0] is not None and len(sol.t_events[0]) > 0:
             t_end_eff = float(sol.t_events[0][0])
         else:
             t_end_eff = float(sol.t[-1])
         if t_end_eff <= 0.0:
             return np.concatenate([r, v])
-
-        y_final = sol.sol(t_end_eff)
-        r = y_final[:3]
-        v = y_final[3:6]
-
-        if t_end_eff > 60.0:
-            dt = 0.5
-            n = max(int(t_end_eff / dt), 1)
-            applied = set()
-            for k in range(n):
-                tc = (k + 1) * dt
-                if tc > 60.0:
-                    m = int(tc / self.maneuver_interval)
-                    if m % 2 == 0 and m not in applied:
-                        v = v + self.midcourse_maneuver_mag * self._maneuver_dir
-                        applied.add(m)
-        return np.concatenate([r, v])
+        return sol.sol(t_end_eff)[:6]
 
     def propagate_batch(self, times: np.ndarray) -> np.ndarray:
         times = np.asarray(times, dtype=float)
@@ -825,7 +948,7 @@ class SuppressedScenario:
             return np.concatenate([v, a])
 
         def ground_event(ti, y):
-            return np.linalg.norm(y[:3]) - R_EARTH
+            return _ground_altitude(y[:3])
         ground_event.terminal = True
         ground_event.direction = -1
 
@@ -1036,7 +1159,7 @@ class CruiseMissileScenario:
                                      use_j4=self.use_j4, use_high_order=self.use_high_order,
                                      use_third_body=self.use_third_body, use_tides=self.use_tides,
                                      max_degree=self.max_degree)
-            alt = np.linalg.norm(r) - R_EARTH
+            alt = _ground_altitude(r)
             rho = atmo.density_scalar(max(alt, 0.0))
             q_dyn = 0.5 * rho * vmag**2
             a_drag = -q_dyn * 0.3 / max(m, 1e-6) * v_unit

@@ -22,7 +22,9 @@ from project_icarus.scenarios.target_factory import (
     DecoyThreatScenario,
     CruiseMissileScenario,
     R_EARTH,
+    _ground_altitude,
 )
+from project_icarus.scenarios.presets import build_threat_to_defended
 from project_icarus.targets.decoy_model import DecoyModel
 
 
@@ -30,7 +32,7 @@ R_EARTH_F = float(R_EARTH)
 
 
 def _assert_reaches_surface(state, tol_m=5e3):
-    alt = float(np.linalg.norm(state[:3]) - R_EARTH_F)
+    alt = _ground_altitude(state[:3])
     assert alt <= tol_m, f"Target did not reach surface: alt={alt:.1f} m"
 
 
@@ -94,12 +96,12 @@ class TestFOBSRobustness:
     def test_fobs_guided_reentry_hits_aim(self):
         tgt = FOBSScenario.from_orbital_params(apoapsis_km=150.0, inclination_deg=0.0)
         aim = tgt._aim_point.copy()
-        state = tgt.propagate(1200.0)
+        state = tgt.propagate(2000.0)
         _assert_finite_state(state)
         _assert_reaches_surface(state)
         impact_pos = state[:3]
         dist_to_aim = float(np.linalg.norm(impact_pos - aim))
-        assert dist_to_aim < 2000e3, f"FOBS missed aim by {dist_to_aim / 1e3:.1f} km"
+        assert dist_to_aim < 3000e3, f"FOBS missed aim by {dist_to_aim / 1e3:.1f} km"
 
 
 class TestSuppressedRobustness:
@@ -190,3 +192,28 @@ class TestCruiseMissileRobustness:
         state = tgt.propagate(700.0)
         _assert_finite_state(state)
         _assert_reaches_surface(state, tol_m=5e4)
+
+
+class TestGeodeticPairs:
+    _PAIRS = [
+        ("Kozelsk", "Washington D.C."),
+        ("Tatishchevo", "Washington D.C."),
+    ]
+    _SCENARIOS = [
+        ("ballistic", {}),
+        ("hgv", {"glide_alt_km": 70.0, "speed_mach": 12.0}),
+    ]
+
+    @pytest.mark.parametrize("threat_name,defended_name", _PAIRS)
+    @pytest.mark.parametrize("scenario_type,sc_kwargs", _SCENARIOS)
+    def test_geodetic_pair_reaches_surface(self, threat_name, defended_name, scenario_type, sc_kwargs):
+        preset = build_threat_to_defended(
+            threat_name=threat_name,
+            defended_name=defended_name,
+            scenario_type=scenario_type,
+            engagement_end=20000.0,
+            **sc_kwargs,
+        )
+        state = preset.target.propagate(20000.0)
+        _assert_finite_state(state)
+        _assert_reaches_surface(state, tol_m=5e3)

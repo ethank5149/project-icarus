@@ -104,6 +104,85 @@ def _great_circle_azimuth_range_km(
     return float(azimuth), float(dist_km)
 
 
+def _lambert_solve(r1, v1_approx, r2, mu, t_max, max_iter=30, tol=1.0):
+    """Solve Lambert's problem using iterative shooting with full 3-DOF propagation.
+    
+    Given initial position r1, target position r2, and time of flight t_max,
+    find the velocity v1 that makes the trajectory reach r2 in time t_max.
+    Uses bisection on the velocity magnitude with full orbital propagation.
+    """
+    r1 = np.asarray(r1, dtype=float)
+    r2 = np.asarray(r2, dtype=float)
+    r1_mag = np.linalg.norm(r1)
+    
+    # Direction from r1 to r2
+    to_r2 = r2 - r1
+    to_r2_mag = np.linalg.norm(to_r2)
+    to_r2_dir = to_r2 / max(to_r2_mag, 1e-12)
+    
+    # Initial velocity direction: perpendicular to r1 in the plane of r1 and r2
+    r1_dir = r1 / max(r1_mag, 1e-12)
+    plane_normal = np.cross(r1_dir, to_r2_dir)
+    plane_normal = plane_normal / max(np.linalg.norm(plane_normal), 1e-12)
+    v_dir = np.cross(plane_normal, r1_dir)
+    v_dir = v_dir / max(np.linalg.norm(v_dir), 1e-12)
+    
+    # Ensure v_dir points generally toward r2
+    if np.dot(v_dir, to_r2_dir) < 0:
+        v_dir = -v_dir
+    
+    # Bounds for velocity magnitude
+    v_circular = np.sqrt(mu / r1_mag)
+    v_escape = np.sqrt(2.0 * mu / r1_mag)
+    
+    def _range_error(v_mag):
+        v0 = v_dir * v_mag
+        tgt = BallisticScenario(r0=r1, v0=v0, use_j2=True, adaptive=True)
+        try:
+            state = tgt.propagate(t_max)
+        except Exception:
+            return 1e6
+        r = state[:3]
+        alt = np.linalg.norm(r) - R_EARTH
+        if alt > 100e3:
+            return 1e6
+        lat_i, lon_i, _ = ecef_to_geodetic(r)
+        _, dist = _great_circle_azimuth_range_km(lat_i, lon_i, 
+                                                  ecef_to_geodetic(r2)[0], 
+                                                  ecef_to_geodetic(r2)[1])
+        return dist
+    
+    # Find bracket for bisection
+    v_low = v_circular * 0.8
+    v_high = v_escape * 0.95
+    
+    f_low = _range_error(v_low)
+    f_high = _range_error(v_high)
+    
+    # Expand bounds if needed
+    while f_low * f_high > 0 and v_high < v_escape * 1.2:
+        v_high *= 1.1
+        f_high = _range_error(v_high)
+    
+    if f_low * f_high > 0:
+        return v_dir * v_circular * 1.2
+    
+    # Bisection
+    for _ in range(max_iter):
+        v_mid = (v_low + v_high) / 2.0
+        f_mid = _range_error(v_mid)
+        if abs(f_mid) < tol:
+            break
+        if f_low * f_mid <= 0:
+            v_high = v_mid
+            f_high = f_mid
+        else:
+            v_low = v_mid
+            f_low = f_mid
+    
+    return v_dir * (v_low + v_high) / 2.0
+
+
 def launch_to_target_velocity(
     lat_deg: float,
     lon_deg: float,
@@ -114,24 +193,27 @@ def launch_to_target_velocity(
 ) -> Tuple[np.ndarray, float]:
     """Compute a launch ``v0`` (ECEF) aimed at ``az_deg`` over ``range_km``.
 
-    Uses the flat-Earth maximum-range relation ``R = v0^2 * sin(2*el) / g``
-    evaluated at the local gravitational acceleration, then rotates the
-    resulting velocity vector into the local East/North/Up frame. Returns
-    ``(v0_ecef, speed)``.
+    Uses Lambert's problem solution with iterative full 3-DOF propagation
+    to find the velocity vector that reaches the target. This is the
+    standard military/industry approach for ballistic missile targeting.
     """
-    el = np.radians(launch_el_deg)
-    rmag = R_EARTH + alt_m
-    g = MU_EARTH / rmag**2
-    sin_2el = np.sin(2.0 * el)
-    if sin_2el < 1e-6:
-        raise ValueError("Launch elevation too close to 0/90 deg.")
-    speed = np.sqrt(g * (range_km * 1000.0) / sin_2el)
-    az = np.radians(az_deg)
-    east, north, up = _enu_basis(lat_deg, lon_deg)
-    horizontal = np.cos(az) * north + np.sin(az) * east
-    direction = np.cos(el) * horizontal + np.sin(el) * up
-    direction = direction / np.linalg.norm(direction)
-    return direction * speed, float(speed)
+    r0 = geodetic_to_ecef(lat_deg, lon_deg, alt_m)
+    
+    # Compute target position
+    d_az = np.radians(az_deg)
+    d_lat = range_km * np.sin(d_az) / 111.0
+    d_lon = range_km * np.cos(d_az) / (111.0 * max(np.cos(np.radians(lat_deg)), 0.1))
+    target_lat = lat_deg + d_lat
+    target_lon = lon_deg + d_lon
+    r_target = geodetic_to_ecef(target_lat, target_lon, 0.0)
+    
+    # Time of flight estimate (ballistic trajectory)
+    t_est = range_km * 1000.0 / 3000.0  # rough estimate at ~3 km/s
+    
+    v0 = _lambert_solve(r0, None, r_target, MU_EARTH, t_est)
+    speed = float(np.linalg.norm(v0))
+    
+    return v0, speed
 
 
 def geodetic_launch_to_target(
@@ -185,10 +267,19 @@ def geodetic_launch_to_target(
         rmag = np.linalg.norm(r0)
         r_apo = R_EARTH + apoapsis_km * 1e3
         v_mag = np.sqrt(MU_EARTH * (2.0 / rmag - 1.0 / r_apo))
-        v0, _ = launch_to_target_velocity(
-            launch_lat, launch_lon, launch_alt, az, rng, launch_el_deg=5.0
-        )
-        v0 = v0 / np.linalg.norm(v0) * v_mag
+        # Orbital velocity is perpendicular to radius in the orbital plane
+        # defined by launch point and target point.
+        r_target = geodetic_to_ecef(target_lat, target_lon, target_alt)
+        orbital_plane_normal = np.cross(r0, r_target)
+        orbital_plane_normal = orbital_plane_normal / np.linalg.norm(orbital_plane_normal)
+        v_dir = np.cross(orbital_plane_normal, r0)
+        v_dir = v_dir / np.linalg.norm(v_dir)
+        # Ensure velocity points generally toward the target azimuth
+        east, north, up = _enu_basis(launch_lat, launch_lon)
+        horizontal = np.cos(az) * north + np.sin(az) * east
+        if np.dot(v_dir, horizontal) < 0:
+            v_dir = -v_dir
+        v0 = v_dir * v_mag
         target = FOBSScenario(
             r0=r0, v0=v0, apoapsis_km=apoapsis_km
         )
