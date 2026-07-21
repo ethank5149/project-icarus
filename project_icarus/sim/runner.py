@@ -614,6 +614,9 @@ def _integrate_trajectory(interceptor, guidance_law, target, scenario, perturb=N
     return traj, target_traj, miss, kill
 
 
+from .parallel_mc import ParallelMonteCarloRunner
+
+
 class EngagementRunner:
     """End-to-end engagement simulation runner (event-driven)."""
 
@@ -630,9 +633,10 @@ class EngagementRunner:
         self.target = target
         self.scenario = scenario
         self.cfg = cfg or get_config()
+        self._parallel_runner = ParallelMonteCarloRunner()
 
     def run(self, n_trials: int = 50, perturbations: Optional[Dict[str, float]] = None,
-            cfg: Optional[SimConfig] = None) -> EngagementResult:
+            cfg: Optional[SimConfig] = None, parallel: bool = True) -> EngagementResult:
         cfg = cfg or self.cfg
         if perturbations is None:
             perturbations = dict(cfg.perturbations)
@@ -645,28 +649,36 @@ class EngagementRunner:
             cfg=cfg, rng=rng,
         )
 
-        mc_misses = []
-        mc_kills = []
-        mc_perturbs = []
-        for _ in range(n_trials):
-            _, _, miss, kill = _integrate_trajectory(
+        if parallel and n_trials > 1:
+            mc_result = self._parallel_runner.run(
                 self.interceptor, self.guidance, self.target, self.scenario,
-                perturb=perturbations, cfg=cfg, rng=rng,
+                n_trials=n_trials, perturbations=perturbations, cfg=cfg,
+                base_seed=cfg.seed + 1000,
             )
-            # Phase 3.4: reject non-finite (NaN/Inf) trials so they cannot
-            # silently pollute kill statistics; log for traceability.
-            if not np.isfinite(miss):
-                if cfg.reject_nonfinite:
-                    logger.warning("rejecting non-finite miss distance (trial); "
-                                   "cf. numerical safeguard 3.4")
+            mc_misses = mc_result["miss_distances"]
+            mc_kills = mc_result["kill_assessments"]
+            mc_perturbs = mc_result["perturbations"]
+        else:
+            mc_misses = []
+            mc_kills = []
+            mc_perturbs = []
+            for _ in range(n_trials):
+                _, _, miss, kill = _integrate_trajectory(
+                    self.interceptor, self.guidance, self.target, self.scenario,
+                    perturb=perturbations, cfg=cfg, rng=rng,
+                )
+                if not np.isfinite(miss):
+                    if cfg.reject_nonfinite:
+                        logger.warning("rejecting non-finite miss distance (trial); "
+                                       "cf. numerical safeguard 3.4")
+                        continue
+                    mc_misses.append(float("nan"))
+                    mc_kills.append(False)
+                    mc_perturbs.append(perturbations)
                     continue
-                mc_misses.append(float("nan"))
-                mc_kills.append(False)
+                mc_misses.append(miss)
+                mc_kills.append(kill)
                 mc_perturbs.append(perturbations)
-                continue
-            mc_misses.append(miss)
-            mc_kills.append(kill)
-            mc_perturbs.append(perturbations)
 
         mc = MonteCarloResult(
             miss_distances=mc_misses,
