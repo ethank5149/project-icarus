@@ -39,8 +39,28 @@ def _wgs84_radius(r):
 
 
 def _ground_altitude(r):
-    """Compute altitude above WGS84 ellipsoid (meters)."""
-    return float(np.linalg.norm(np.asarray(r, dtype=float)) - _wgs84_radius(r))
+    """Compute altitude above actual ground surface (meters)."""
+    x, y, z = np.asarray(r, dtype=float)
+    lon = np.degrees(np.arctan2(y, x))
+    p = np.sqrt(x * x + y * y)
+    if p < 1e-6:
+        lat = 90.0 if z > 0 else -90.0
+        eccen_n = _WGS84_A / np.sqrt(1.0 - _WGS84_E2 * np.sin(np.radians(lat)) ** 2)
+        alt_ellip = float(abs(z) - eccen_n * (1.0 - _WGS84_E2))
+    else:
+        b = _WGS84_B
+        e_prime2 = _WGS84_E2 / (1.0 - _WGS84_E2)
+        theta = np.arctan2(z * _WGS84_A, p * b)
+        lat = np.degrees(np.arctan2(
+            z + e_prime2 * b * np.sin(theta) ** 3,
+            p - _WGS84_E2 * _WGS84_A * np.cos(theta) ** 3,
+        ))
+        sin_lat = np.sin(np.radians(lat))
+        N = _WGS84_A / np.sqrt(1.0 - _WGS84_E2 * sin_lat ** 2)
+        alt_ellip = float(p / np.cos(np.radians(lat)) - N)
+    from ..reference.surface_elevation import get_surface_elevation
+    elev = float(get_surface_elevation(float(lat), float(lon)))
+    return alt_ellip - elev
 
 
 def _two_body_accel(r, use_j2=True, use_j3=False, use_j4=False,
@@ -889,7 +909,7 @@ class SuppressedScenario:
         for maneuver_t in maneuver_times:
             if maneuver_t > t:
                 break
-            alt_before = np.linalg.norm(current_y[:3]) - R_EARTH
+            alt_before = _ground_altitude(current_y[:3])
             if alt_before < 100e3:
                 break
             sol = solve_ivp(

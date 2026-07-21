@@ -487,3 +487,83 @@ class TestEOMGravityFidelity:
         d = eom.compute(1000.0, st, surf)
         assert np.all(np.isfinite(d["v"]))
         assert np.linalg.norm(d["v"]) > 0.0
+
+
+class TestWGS84Fidelity:
+    def test_geodetic_ecef_roundtrip(self):
+        from project_icarus.scenarios.target_factory import _ecef_to_geodetic
+        from project_icarus.scenarios.presets import geodetic_to_ecef
+        rng = np.random.default_rng(42)
+        for _ in range(20):
+            lat = rng.uniform(-80, 80)
+            lon = rng.uniform(-180, 180)
+            alt = rng.uniform(-500, 10000)
+            r = geodetic_to_ecef(lat, lon, alt)
+            lat2, lon2, alt2 = _ecef_to_geodetic(r)
+            assert np.isclose(lat, lat2, atol=1e-8)
+            assert np.isclose(lon, lon2, atol=1e-8)
+            assert np.isclose(alt, alt2, rtol=1e-6)
+
+    def test_surface_at_prime_meridian(self):
+        from project_icarus.scenarios.target_factory import _ecef_to_geodetic
+        r = np.array([6378137.0, 0.0, 0.0])
+        lat, lon, alt = _ecef_to_geodetic(r)
+        assert np.isclose(lat, 0.0, atol=1e-6)
+        assert np.isclose(lon, 0.0, atol=1e-6)
+        assert np.isclose(alt, 0.0, atol=100.0)
+
+    def test_surface_at_north_pole(self):
+        from project_icarus.scenarios.target_factory import _ecef_to_geodetic
+        r = np.array([0.0, 0.0, 6356752.0])
+        lat, lon, alt = _ecef_to_geodetic(r)
+        assert lat > 85.0
+        assert np.isclose(alt, 0.0, atol=500.0)
+
+
+class TestEnergyConservation:
+    def test_keplerian_energy_conserved(self):
+        from project_icarus.scenarios.target_factory import _two_body_accel
+        rng = np.random.default_rng(42)
+        for _ in range(5):
+            r = rng.uniform(6500e3, 8000e3, 3)
+            v = rng.uniform(-8e3, 8e3, 3)
+            e0 = 0.5 * np.dot(v, v) - MU_EARTH / np.linalg.norm(r)
+            dt = 0.5
+            for _ in range(200):
+                a = _two_body_accel(r, use_j2=False)
+                v = v + a * dt
+                r = r + v * dt
+            e1 = 0.5 * np.dot(v, v) - MU_EARTH / np.linalg.norm(r)
+            assert np.isclose(e0, e1, rtol=1e-3)
+
+    def test_angular_momentum_conserved(self):
+        from project_icarus.scenarios.target_factory import _two_body_accel
+        rng = np.random.default_rng(42)
+        for _ in range(5):
+            r = rng.uniform(6500e3, 8000e3, 3)
+            v = rng.uniform(-8e3, 8e3, 3)
+            h0 = np.cross(r, v)
+            dt = 0.5
+            for _ in range(200):
+                a = _two_body_accel(r, use_j2=False)
+                v = v + a * dt
+                r = r + v * dt
+            h1 = np.cross(r, v)
+            assert np.allclose(h0, h1, rtol=1e-3)
+
+
+class TestGeodeticGeometry:
+    def test_great_circle_distance(self):
+        from project_icarus.scenarios.presets import _great_circle_azimuth_range_km
+        az, rng = _great_circle_azimuth_range_km(0.0, 0.0, 0.0, 90.0)
+        assert 0.0 <= az <= 360.0
+        assert rng > 0.0
+
+    def test_surface_elevation_nonnegative(self):
+        from project_icarus.reference.surface_elevation import get_surface_elevation
+        rng = np.random.default_rng(42)
+        for _ in range(10):
+            lat = rng.uniform(-60, 60)
+            lon = rng.uniform(-120, 120)
+            elev = get_surface_elevation(lat, lon)
+            assert np.isfinite(elev)
