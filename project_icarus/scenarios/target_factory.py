@@ -11,6 +11,11 @@ from ..aero.aero_analytical import blended_aero
 from ..dynamics.atmosphere import Atmosphere
 from ..dynamics.gravity import gravity_inertial
 
+try:
+    from ..dynamics.gravity import gravity_inertial_jit, GRAVITY_JIT_AVAILABLE
+except Exception:
+    GRAVITY_JIT_AVAILABLE = False
+
 
 MU_EARTH = 3.986004418e14
 R_EARTH = 6371e3
@@ -21,6 +26,21 @@ def _two_body_accel(r, use_j2=True, use_j3=False, use_j4=False,
                      use_high_order=False, use_third_body=False, use_tides=False,
                      max_degree=10, t=0.0):
     """Central + zonal + third-body + tidal acceleration (thin wrapper over gravity_inertial)."""
+    if GRAVITY_JIT_AVAILABLE and not (use_j3 or use_j4 or use_third_body or use_tides):
+        return gravity_inertial_jit(
+            r,
+            use_j2,
+            J2_EARTH,
+            -2.532e-6,
+            -1.610e-6,
+            use_high_order,
+            False,
+            False,
+            t,
+            False,
+            False,
+            max_degree,
+        )
     return gravity_inertial(
         r,
         use_j2=use_j2,
@@ -51,9 +71,66 @@ def _rk4_step(r, v, dt, accel_func):
     return r_new, v_new
 
 
-# --- Spherical-Earth geodetic helpers (for aim-point computation) ----------
-# These are intentionally lightweight (spherical Earth, not WGS84) so the
-# target factory has no import cycle with ``scenarios.presets``.
+try:
+    from numba import njit
+
+    @njit
+    def _propagate_ballistic_jit(r0, v0, dt, n_steps, use_j2, j2, j3, j4,
+                                 use_high_order, use_third_body, use_tides, max_degree, t,
+                                 use_j3_flag, use_j4_flag):
+        r = r0.copy()
+        v = v0.copy()
+        for _ in range(n_steps):
+            k1_v = gravity_inertial_jit(r, use_j2, j2, j3, j4, use_high_order,
+                                        use_third_body, use_tides, t, use_j3_flag, use_j4_flag, max_degree)
+            k1_r = v
+            k2_v = gravity_inertial_jit(r + 0.5*dt*k1_r, use_j2, j2, j3, j4, use_high_order,
+                                        use_third_body, use_tides, t, use_j3_flag, use_j4_flag, max_degree)
+            k2_r = v + 0.5*dt*k1_v
+            k3_v = gravity_inertial_jit(r + 0.5*dt*k2_r, use_j2, j2, j3, j4, use_high_order,
+                                        use_third_body, use_tides, t, use_j3_flag, use_j4_flag, max_degree)
+            k3_r = v + 0.5*dt*k2_v
+            k4_v = gravity_inertial_jit(r + dt*k3_r, use_j2, j2, j3, j4, use_high_order,
+                                        use_third_body, use_tides, t, use_j3_flag, use_j4_flag, max_degree)
+            k4_r = v + dt*k3_v
+            r = r + (dt/6.0)*(k1_r + 2.0*k2_r + 2.0*k3_r + k4_r)
+            v = v + (dt/6.0)*(k1_v + 2.0*k2_v + 2.0*k3_v + k4_v)
+        return r, v
+
+    @njit
+    def _propagate_suppressed_jit(r0, v0, dt, n_steps, use_j2, j2, j3, j4,
+                                  use_high_order, use_third_body, use_tides, max_degree, t,
+                                  use_j3_flag, use_j4_flag,
+                                  maneuver_mag, maneuver_dir, maneuver_interval):
+        r = r0.copy()
+        v = v0.copy()
+        applied = np.zeros(1000, dtype=np.bool_)
+        for k in range(n_steps):
+            tc = (k + 1) * dt
+            k1_v = gravity_inertial_jit(r, use_j2, j2, j3, j4, use_high_order,
+                                        use_third_body, use_tides, t, use_j3_flag, use_j4_flag, max_degree)
+            k1_r = v
+            k2_v = gravity_inertial_jit(r + 0.5*dt*k1_r, use_j2, j2, j3, j4, use_high_order,
+                                        use_third_body, use_tides, t, use_j3_flag, use_j4_flag, max_degree)
+            k2_r = v + 0.5*dt*k1_v
+            k3_v = gravity_inertial_jit(r + 0.5*dt*k2_r, use_j2, j2, j3, j4, use_high_order,
+                                        use_third_body, use_tides, t, use_j3_flag, use_j4_flag, max_degree)
+            k3_r = v + 0.5*dt*k2_v
+            k4_v = gravity_inertial_jit(r + dt*k3_r, use_j2, j2, j3, j4, use_high_order,
+                                        use_third_body, use_tides, t, use_j3_flag, use_j4_flag, max_degree)
+            k4_r = v + dt*k3_v
+            r = r + (dt/6.0)*(k1_r + 2.0*k2_r + 2.0*k3_r + k4_r)
+            v = v + (dt/6.0)*(k1_v + 2.0*k2_v + 2.0*k3_v + k4_v)
+            if tc > 60.0:
+                m = int(tc / maneuver_interval)
+                if m % 2 == 0 and not applied[m]:
+                    v = v + maneuver_mag * maneuver_dir
+                    applied[m] = True
+        return r, v
+
+    NUMBA_PROPAGATORS_AVAILABLE = True
+except Exception:
+    NUMBA_PROPAGATORS_AVAILABLE = False
 
 def _ecef_to_geodetic(r):
     x, y, z = r
@@ -219,6 +296,7 @@ class TargetScenario(Protocol):
     metadata: Dict[str, Any]
 
     def propagate(self, t: float) -> np.ndarray: ...
+    def propagate_batch(self, times: np.ndarray) -> np.ndarray: ...
 
 
 @dataclass
@@ -250,11 +328,36 @@ class BallisticScenario:
     def _propagate_integrated(self, t: float) -> np.ndarray:
         r = self.r0.astype(float).copy()
         v = self.v0.astype(float).copy()
-        dt = 0.5
-        n = max(int(t / dt), 1)
-        for _ in range(n):
-            r, v = _rk4_step(r, v, dt, self._accel)
-        return np.concatenate([r, v])
+        y0 = np.concatenate([r, v])
+
+        def rhs(ti, y):
+            r, v = y[:3], y[3:]
+            a = self._accel(r, v)
+            return np.concatenate([v, a])
+
+        def ground_event(ti, y):
+            return np.linalg.norm(y[:3]) - R_EARTH
+        ground_event.terminal = True
+        ground_event.direction = -1
+
+        sol = solve_ivp(rhs, (0.0, t), y0, method="RK45",
+                        rtol=1e-6, atol=1e-9, max_step=5.0,
+                        events=ground_event, dense_output=True)
+        if sol.t_events[0] is not None and len(sol.t_events[0]) > 0:
+            t_end_eff = float(sol.t_events[0][0])
+        else:
+            t_end_eff = float(sol.t[-1])
+        if t_end_eff <= 0.0:
+            return np.concatenate([r, v])
+        return sol.sol(t_end_eff)[:6]
+
+    def propagate_batch(self, times: np.ndarray) -> np.ndarray:
+        times = np.asarray(times, dtype=float)
+        if self.adaptive or self.use_j3 or self.use_j4 or self.use_third_body or self.use_tides:
+            return np.array([self._propagate_integrated(ti) for ti in times])
+        r0 = self.r0.astype(float)
+        v0 = self.v0.astype(float)
+        return np.array([_kepler_propagate(r0, v0, ti, MU_EARTH) for ti in times])
 
 
 def _kepler_propagate(r0, v0, t, mu):
@@ -465,6 +568,16 @@ class FOBSScenario:
         frac = (t - t0) / (t1 - t0)
         return (1.0 - frac) * all_s[idx - 1] + frac * all_s[idx]
 
+    def propagate_batch(self, times: np.ndarray) -> np.ndarray:
+        times = np.asarray(times, dtype=float)
+        all_t, all_s = self._full_trajectory()
+        idx = np.searchsorted(all_t, times)
+        idx = np.clip(idx, 1, len(all_t) - 1)
+        t0 = all_t[idx - 1]
+        t1 = all_t[idx]
+        frac = np.where(np.abs(t1 - t0) < 1e-9, 0.0, (times - t0) / (t1 - t0))
+        return (1.0 - frac)[:, None] * all_s[idx - 1] + frac[:, None] * all_s[idx]
+
     @classmethod
     def from_orbital_params(cls, apoapsis_km: float, inclination_deg: float, launch_site_alt_km: float = 0.0):
         r0 = np.array([R_EARTH + launch_site_alt_km * 1e3, 0.0, 0.0])
@@ -533,15 +646,59 @@ class HGVScenario:
         return a_grav + a_drag + a_lift
 
     def propagate(self, t: float) -> np.ndarray:
-        if self.adaptive:
-            return self._propagate_adaptive(t)
         r = self.r0.astype(float).copy()
         v = self.v0.astype(float).copy()
-        dt = 0.5
-        n = max(int(t / dt), 1)
-        for _ in range(n):
-            r, v = _rk4_step(r, v, dt, self._accel)
-        return np.concatenate([r, v])
+        y0 = np.concatenate([r, v])
+
+        def rhs(ti, y):
+            r, v = y[:3], y[3:]
+            a = self._accel(r, v)
+            return np.concatenate([v, a])
+
+        def ground_event(ti, y):
+            return np.linalg.norm(y[:3]) - R_EARTH
+        ground_event.terminal = True
+        ground_event.direction = -1
+
+        sol = solve_ivp(rhs, (0.0, t), y0, method="RK45",
+                        rtol=1e-6, atol=1e-9, max_step=5.0,
+                        events=ground_event, dense_output=True)
+        if sol.t_events[0] is not None and len(sol.t_events[0]) > 0:
+            t_end_eff = float(sol.t_events[0][0])
+        else:
+            t_end_eff = float(sol.t[-1])
+        if t_end_eff <= 0.0:
+            return np.concatenate([r, v])
+        return sol.sol(t_end_eff)[:6]
+
+    def propagate_batch(self, times: np.ndarray) -> np.ndarray:
+        times = np.asarray(times, dtype=float)
+        t_max = float(np.max(times)) if times.size > 0 else 0.0
+        r = self.r0.astype(float).copy()
+        v = self.v0.astype(float).copy()
+        y0 = np.concatenate([r, v])
+
+        def rhs(ti, y):
+            r, v = y[:3], y[3:]
+            a = self._accel(r, v)
+            return np.concatenate([v, a])
+
+        def ground_event(ti, y):
+            return np.linalg.norm(y[:3]) - R_EARTH
+        ground_event.terminal = True
+        ground_event.direction = -1
+
+        sol = solve_ivp(rhs, (0.0, t_max), y0, method="RK45",
+                        rtol=1e-6, atol=1e-9, max_step=5.0,
+                        events=ground_event, dense_output=True)
+        if sol.t_events[0] is not None and len(sol.t_events[0]) > 0:
+            t_ground = float(sol.t_events[0][0])
+        else:
+            t_ground = float(sol.t[-1])
+
+        t_clamped = np.clip(times, 0.0, t_ground)
+        states = sol.sol(t_clamped)[:6, :].T
+        return states
 
     def _propagate_adaptive(self, t: float) -> np.ndarray:
         r = self.r0.astype(float).copy()
@@ -612,24 +769,50 @@ class SuppressedScenario:
                                max_degree=self.max_degree)
 
     def propagate(self, t: float) -> np.ndarray:
-        if self.adaptive:
-            return self._propagate_adaptive(t)
         r = self.r0.astype(float).copy()
         v = self.v0.astype(float).copy()
-        dt = 0.5
-        n = max(int(t / dt), 1)
-        applied = set()
-        for k in range(n):
-            tc = (k + 1) * dt
+        y0 = np.concatenate([r, v])
+
+        def rhs(ti, y):
+            r, v = y[:3], y[3:]
             a = self._accel(r, v)
-            v = v + a * dt
-            r = r + v * dt
-            if tc > 60.0:
-                m = int(tc / self.maneuver_interval)
-                if m % 2 == 0 and m not in applied:
-                    v = v + self.midcourse_maneuver_mag * self._maneuver_dir
-                    applied.add(m)
+            return np.concatenate([v, a])
+
+        def ground_event(ti, y):
+            return np.linalg.norm(y[:3]) - R_EARTH
+        ground_event.terminal = True
+        ground_event.direction = -1
+
+        sol = solve_ivp(rhs, (0.0, t), y0, method="RK45",
+                        rtol=1e-6, atol=1e-9, max_step=5.0,
+                        events=ground_event, dense_output=True)
+        if sol.t_events[0] is not None and len(sol.t_events[0]) > 0:
+            t_end_eff = float(sol.t_events[0][0])
+        else:
+            t_end_eff = float(sol.t[-1])
+        if t_end_eff <= 0.0:
+            return np.concatenate([r, v])
+
+        y_final = sol.sol(t_end_eff)
+        r = y_final[:3]
+        v = y_final[3:6]
+
+        if t_end_eff > 60.0:
+            dt = 0.5
+            n = max(int(t_end_eff / dt), 1)
+            applied = set()
+            for k in range(n):
+                tc = (k + 1) * dt
+                if tc > 60.0:
+                    m = int(tc / self.maneuver_interval)
+                    if m % 2 == 0 and m not in applied:
+                        v = v + self.midcourse_maneuver_mag * self._maneuver_dir
+                        applied.add(m)
         return np.concatenate([r, v])
+
+    def propagate_batch(self, times: np.ndarray) -> np.ndarray:
+        times = np.asarray(times, dtype=float)
+        return np.array([self.propagate(ti) for ti in times])
 
     def _propagate_adaptive(self, t: float) -> np.ndarray:
         r = self.r0.astype(float).copy()
@@ -690,8 +873,16 @@ class SwarmScenario:
     def propagate(self, t: float) -> np.ndarray:
         return self._payloads[0].propagate(t)
 
+    def propagate_batch(self, times: np.ndarray) -> np.ndarray:
+        times = np.asarray(times, dtype=float)
+        return self._payloads[0].propagate_batch(times)
+
     def payload_states(self, t: float) -> List[np.ndarray]:
         return [p.propagate(t) for p in self._payloads]
+
+    def payload_states_batch(self, times: np.ndarray) -> List[np.ndarray]:
+        times = np.asarray(times, dtype=float)
+        return [p.propagate_batch(times) for p in self._payloads]
 
     @classmethod
     def from_params(cls, n_payloads: int, spread_deg: float, range_km: float):
@@ -767,6 +958,12 @@ class DecoyThreatScenario:
 
     def propagate(self, t: float) -> np.ndarray:
         return self.rv.propagate(t)
+
+    def propagate_batch(self, times: np.ndarray) -> np.ndarray:
+        times = np.asarray(times, dtype=float)
+        if hasattr(self.rv, "propagate_batch"):
+            return self.rv.propagate_batch(times)
+        return np.array([self.rv.propagate(ti) for ti in times])
 
     def _release_decoys(self, t: float):
         if t >= self.release_t:
@@ -924,6 +1121,16 @@ class CruiseMissileScenario:
             return all_s[idx]
         frac = (t - t0) / (t1 - t0)
         return (1.0 - frac) * all_s[idx - 1] + frac * all_s[idx]
+
+    def propagate_batch(self, times: np.ndarray) -> np.ndarray:
+        times = np.asarray(times, dtype=float)
+        all_t, all_s = self._compute_trajectory()
+        idx = np.searchsorted(all_t, times)
+        idx = np.clip(idx, 1, len(all_t) - 1)
+        t0 = all_t[idx - 1]
+        t1 = all_t[idx]
+        frac = np.where(np.abs(t1 - t0) < 1e-9, 0.0, (times - t0) / (t1 - t0))
+        return (1.0 - frac)[:, None] * all_s[idx - 1] + frac[:, None] * all_s[idx]
 
     @classmethod
     def from_params(cls, launch_alt_km: float = 0.0, range_km: float = 500.0,

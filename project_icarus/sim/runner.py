@@ -608,8 +608,8 @@ def _integrate_trajectory(interceptor, guidance_law, target, scenario, perturb=N
     }
     target_traj = {
         "t": sol_t,
-        "r": np.array([target_fn(ti)[:3] for ti in sol_t]),
-        "v": np.array([target_fn(ti)[3:] for ti in sol_t]),
+        "r": target.propagate_batch(sol_t)[:, :3] if hasattr(target, "propagate_batch") else np.array([target_fn(ti)[:3] for ti in sol_t]),
+        "v": target.propagate_batch(sol_t)[:, 3:] if hasattr(target, "propagate_batch") else np.array([target_fn(ti)[3:] for ti in sol_t]),
     }
     return traj, target_traj, miss, kill
 

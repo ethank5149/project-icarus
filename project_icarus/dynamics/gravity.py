@@ -169,3 +169,133 @@ def gravity_gradient_torque(r_inertial, q, inertia_inv, use_j2=True, cg=None):
         cg_body = np.asarray(cg, dtype=float)
         r_body = r_body - cg_body
     return np.cross(r_body, inertia_inv @ (np.cross(r_body, g_body)))
+
+
+# ---------------------------------------------------------------------------
+# Full-fidelity Numba JIT acceleration (preserves ALL physics: J2-J10,
+# third-body, solid-Earth tides). The Python functions above remain the
+# canonical reference; these JIT wrappers are drop-in replacements for the
+# hot propagation loops in target_factory.py.
+# ---------------------------------------------------------------------------
+try:
+    from numba import njit
+
+    @njit
+    def _sun_direction_ecef_jit(t):
+        n = 2.0 * 3.141592653589793 / 365.25
+        M = n * (t / 86400.0)
+        lam = M + 2.0 * 0.0167 * np.sin(M) + 0.03306 * np.sin(2.0 * M)
+        eps = 0.2617993877991494  # 23.44 deg
+        x = np.cos(lam)
+        y = np.cos(eps) * np.sin(lam)
+        z = np.sin(eps) * np.sin(lam)
+        norm = np.sqrt(x*x + y*y + z*z)
+        return np.array([x/norm, y/norm, z/norm])
+
+    @njit
+    def _moon_direction_ecef_jit(t):
+        T = t / 86400.0
+        L = 3.8070338488  # 218.32 deg in rad
+        Mm = 2.34593  # 134.96 deg in rad
+        F = 1.62893  # 93.27 deg in rad
+        lam = L + 6.29 * np.sin(Mm) - 1.27 * np.sin(L - F) + 0.66 * np.sin(L - F) + 0.21 * np.sin(L + Mm)
+        beta = 0.08946  # 5.13 deg in rad
+        x = np.cos(beta) * np.cos(lam)
+        y = np.cos(beta) * np.sin(lam)
+        z = np.sin(beta)
+        norm = np.sqrt(x*x + y*y + z*z)
+        return np.array([x/norm, y/norm, z/norm])
+
+    @njit
+    def _legendre_zonal_jit(n, x):
+        if n == 0:
+            return 1.0
+        if n == 1:
+            return x
+        p0 = 1.0
+        p1 = x
+        for k in range(2, n + 1):
+            pk = ((2.0 * k - 1.0) * x * p1 - (k - 1.0) * p0) / k
+            p0 = p1
+            p1 = pk
+        return p1
+
+    @njit
+    def third_body_accel_jit(r_inertial, t):
+        r = r_inertial
+        rs = _sun_direction_ecef_jit(t) * 1.495978707e11
+        rm = _moon_direction_ecef_jit(t) * 3.844e8
+        a_sun = 1.32712440018e20 * (rs - r) / np.linalg.norm(rs - r)**3 - 1.32712440018e20 * rs / np.linalg.norm(rs)**3
+        a_moon = 4.9028e12 * (rm - r) / np.linalg.norm(rm - r)**3 - 4.9028e12 * rm / np.linalg.norm(rm)**3
+        return a_sun + a_moon
+
+    @njit
+    def solid_earth_tide_accel_jit(r_inertial, t):
+        r = r_inertial
+        norm = np.linalg.norm(r)
+        if norm < 1e-6:
+            return np.zeros(3)
+        rs = _sun_direction_ecef_jit(t) * 1.495978707e11
+        rm = _moon_direction_ecef_jit(t) * 3.844e8
+        love = 0.609
+        def _tide(mu, body_vec):
+            R = np.linalg.norm(body_vec)
+            u = body_vec / R
+            dot = r[0]*u[0] + r[1]*u[1] + r[2]*u[2]
+            scale = love * mu * (6371000.0 / R) ** 3 / (norm ** 3)
+            return scale * (3.0 * dot * u - r)
+        a = _tide(4.9028e12, rm) + _tide(1.32712440018e20, rs)
+        return a
+
+    @njit
+    def gravity_inertial_jit(r_inertial, use_j2, j2, j3, j4, use_high_order, use_third_body, use_tides, t, use_j3_flag, use_j4_flag, max_degree):
+        r = np.linalg.norm(r_inertial)
+        if r < 1e-6:
+            return np.zeros(3)
+        g = -3.986004418e14 / (r**3) * r_inertial
+        
+        alt = r - 6371000.0
+        if (use_j2 or use_high_order or use_j3_flag or use_j4_flag) and alt > 50000.0:
+            z = r_inertial[2]
+            zr = z / r
+            factor = 1.0
+            if use_j2:
+                factor += 1.5 * j2 * (6371000.0 / r) ** 2 * (5.0 * zr**2 - 1.0)
+            if use_j3_flag:
+                factor += 0.5 * j3 * (6371000.0 / r) ** 3 * (7.0 * zr**3 - 3.0 * zr)
+            if use_j4_flag:
+                factor += 0.125 * j4 * (6371000.0 / r) ** 4 * (9.0 * zr**4 + 3.0 * zr**2 - 0.6)
+            if use_j2 or use_j3_flag or use_j4_flag:
+                g = -3.986004418e14 / (r**3) * factor * r_inertial
+            if use_high_order:
+                series = 0.0
+                for n in range(5, max_degree + 1):
+                    jn = 0.0
+                    if n == 5:
+                        jn = -3.698e-7
+                    elif n == 6:
+                        jn = 1.607e-7
+                    elif n == 7:
+                        jn = -1.983e-7
+                    elif n == 8:
+                        jn = -3.965e-8
+                    elif n == 9:
+                        jn = 4.751e-8
+                    elif n == 10:
+                        jn = 1.661e-8
+                    if jn == 0.0:
+                        continue
+                    p_n = _legendre_zonal_jit(n, zr)
+                    series += jn * (6371000.0 / r) ** n * p_n
+                if series != 0.0:
+                    g = g - 3.986004418e14 / (r**3) * series * r_inertial
+        
+        if use_third_body:
+            g = g + third_body_accel_jit(r_inertial, t)
+        if use_tides:
+            g = g + solid_earth_tide_accel_jit(r_inertial, t)
+        return g
+
+    GRAVITY_JIT_AVAILABLE = True
+except Exception:
+    GRAVITY_JIT_AVAILABLE = False

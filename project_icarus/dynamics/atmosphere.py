@@ -40,58 +40,57 @@ _USSA76_LAYERS = [
     (86e3, 100e3, 0.0, 186.95, 0.37338),
 ]
 
+_USSA76_BOTTOMS = np.array([l[0] for l in _USSA76_LAYERS])
+_USSA76_TOPS = np.array([l[1] for l in _USSA76_LAYERS])
+_USSA76_LAPSES = np.array([l[2] for l in _USSA76_LAYERS])
+_USSA76_T_BOTTOMS = np.array([l[3] for l in _USSA76_LAYERS])
+_USSA76_P_BOTTOMS = np.array([l[4] for l in _USSA76_LAYERS])
+
+
+def _layer_index(h):
+    h = np.asarray(h, dtype=float)
+    idx = np.searchsorted(_USSA76_BOTTOMS, h, side='right') - 1
+    return np.clip(idx, 0, len(_USSA76_LAYERS) - 1)
+
 
 def _ussa76_density(h):
     h = np.asarray(h, dtype=float)
-    rho = np.zeros_like(h, dtype=float)
-    for idx, (h_bottom, h_top, lapse, T_bottom, P_bottom) in enumerate(_USSA76_LAYERS):
-        mask = (h >= h_bottom) & (h < h_top) if idx < len(_USSA76_LAYERS) - 1 else (h >= h_bottom) & (h <= h_top)
-        if not np.any(mask):
-            continue
-        h_sub = h[mask]
-        if lapse == 0:
-            T = T_bottom * np.ones_like(h_sub)
-            P = P_bottom * np.exp(-G0 * (h_sub - h_bottom) / (R_AIR * T_bottom))
-        else:
-            T = T_bottom + lapse * (h_sub - h_bottom)
-            ratio = np.where(np.abs(T_bottom) > 1e-12, T / T_bottom, 1.0)
-            P = P_bottom * np.where(ratio > 0, ratio ** (-G0 / (R_AIR * lapse)), 0.0)
-        rho[mask] = P / (R_AIR * T)
-    return rho
+    idx = _layer_index(h)
+    h_bottom = _USSA76_BOTTOMS[idx]
+    lapse = _USSA76_LAPSES[idx]
+    T_bottom = _USSA76_T_BOTTOMS[idx]
+    P_bottom = _USSA76_P_BOTTOMS[idx]
+    T = T_bottom + lapse * (h - h_bottom)
+    T = np.maximum(T, 0.0)
+    ratio = np.where(np.abs(T_bottom) > 1e-12, T / T_bottom, 1.0)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        P = np.where(
+            np.abs(lapse) < 1e-12,
+            P_bottom * np.exp(-G0 * (h - h_bottom) / (R_AIR * T_bottom)),
+            P_bottom * np.where(ratio > 0, ratio ** (-G0 / (R_AIR * lapse)), 0.0),
+        )
+    return P / (R_AIR * T)
 
 
 def _ussa76_temperature(h):
     h = np.asarray(h, dtype=float)
-    T = np.zeros_like(h, dtype=float)
-    for h_bottom, h_top, lapse, T_bottom, _ in _USSA76_LAYERS:
-        if (h_bottom, h_top) == (86e3, 100e3):
-            mask = (h >= h_bottom) & (h <= h_top)
-        else:
-            mask = (h >= h_bottom) & (h < h_top)
-        if not np.any(mask):
-            continue
-        T[mask] = T_bottom + lapse * (h[mask] - h_bottom)
-    return T
+    idx = _layer_index(h)
+    T_bottom = _USSA76_T_BOTTOMS[idx]
+    lapse = _USSA76_LAPSES[idx]
+    h_bottom = _USSA76_BOTTOMS[idx]
+    return T_bottom + lapse * (h - h_bottom)
 
 
 def _ussa76_pressure(h):
     h = np.asarray(h, dtype=float)
-    P = np.zeros_like(h, dtype=float)
-    for h_bottom, h_top, lapse, T_bottom, P_bottom in _USSA76_LAYERS:
-        if (h_bottom, h_top) == (86e3, 100e3):
-            mask = (h >= h_bottom) & (h <= h_top)
-        else:
-            mask = (h >= h_bottom) & (h < h_top)
-        if not np.any(mask):
-            continue
-        h_sub = h[mask]
-        if lapse == 0:
-            P[mask] = P_bottom * np.exp(-G0 * (h_sub - h_bottom) / (R_AIR * T_bottom))
-        else:
-            T_local = T_bottom + lapse * (h_sub - h_bottom)
-            ratio = np.where(np.abs(T_bottom) > 1e-12, T_local / T_bottom, 1.0)
-            P[mask] = P_bottom * np.where(ratio > 0, ratio ** (-G0 / (R_AIR * lapse)), 0.0)
-    return P
+    idx = _layer_index(h)
+    h_bottom = _USSA76_BOTTOMS[idx]
+    lapse = _USSA76_LAPSES[idx]
+    T_bottom = _USSA76_T_BOTTOMS[idx]
+    P_bottom = _USSA76_P_BOTTOMS[idx]
+    T = T_bottom + lapse * (h - h_bottom)
+    ratio = np.where(np.abs(T_bottom) > 1e-12, T / T_bottom, 1.0)
+    return P_bottom * np.where(ratio > 0, ratio ** (-G0 / (R_AIR * lapse)), 0.0)
 
 
 class EndoAtmosphere:
