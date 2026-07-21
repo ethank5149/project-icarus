@@ -11,6 +11,18 @@ extensions = [
         include_dirs=[np.get_include()],
         extra_compile_args=["-O3"],
     ),
+    Extension(
+        "project_icarus.cython_kernels.eom_cython",
+        ["project_icarus/cython_kernels/eom_cython.pyx"],
+        include_dirs=[np.get_include()],
+        extra_compile_args=["-O3"],
+    ),
+    Extension(
+        "project_icarus.cython_kernels.guidance_cython",
+        ["project_icarus/cython_kernels/guidance_cython.pyx"],
+        include_dirs=[np.get_include()],
+        extra_compile_args=["-O3"],
+    ),
 ]
 
 setup(

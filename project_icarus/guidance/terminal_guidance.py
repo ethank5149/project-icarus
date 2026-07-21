@@ -20,7 +20,8 @@ class TerminalGuidance:
     def __init__(self, N=4.0, accel_limit=150.0, kill_radius=0.5, mechanism="hit_to_kill",
                  noise_std=0.01, fov=np.radians(60.0), sigma0=0.01, law="pn",
                  gravity=np.array([0.0, 0.0, -9.81]), zem_horizon=5.0,
-                 sdre_q_pos=1.0, sdre_q_vel=0.1, sdre_r_accel=1.0):
+                 sdre_q_pos=1.0, sdre_q_vel=0.1, sdre_r_accel=1.0,
+                 use_cython=True):
         if law not in self.VALID_LAWS:
             raise ValueError(f"Unknown terminal guidance law: {law!r} (valid: {self.VALID_LAWS})")
         self.law = law
@@ -38,9 +39,46 @@ class TerminalGuidance:
         self.sdre_r_accel = sdre_r_accel
         self.seeker_range = 50e3 if mechanism == "hit_to_kill" else 20e3
         self._last_los = None
+        self.use_cython = use_cython
+        self._cy_los = None
+        self._cy_in_fov = None
+        self._cy_pn_cmd = None
+        self._cy_zem_cmd = None
+        self._cy_sdre_mpc_cmd = None
+        self._cy_midcourse_pn = None
+        if use_cython:
+            try:
+                from project_icarus.cython_kernels.guidance_cython import (
+                    los_vec as cy_los,
+                    in_fov as cy_in_fov,
+                    pn_cmd as cy_pn_cmd,
+                    zem_cmd as cy_zem_cmd,
+                    sdre_mpc_cmd as cy_sdre_mpc_cmd,
+                    midcourse_pn as cy_midcourse_pn,
+                )
+                self._cy_los = cy_los
+                self._cy_in_fov = cy_in_fov
+                self._cy_pn_cmd = cy_pn_cmd
+                self._cy_zem_cmd = cy_zem_cmd
+                self._cy_sdre_mpc_cmd = cy_sdre_mpc_cmd
+                self._cy_midcourse_pn = cy_midcourse_pn
+            except Exception:
+                self.use_cython = False
 
     # --- shared helpers ---------------------------------------------------- #
     def _los(self, interceptor_state, target_state):
+        if self.use_cython and self._cy_los is not None:
+            r = np.asarray(interceptor_state["r"], dtype=float)
+            v = np.asarray(interceptor_state["v"], dtype=float)
+            if isinstance(target_state, dict):
+                tgt = np.concatenate([
+                    np.asarray(target_state["r"], dtype=float),
+                    np.asarray(target_state.get("v", [0, 0, 0]), dtype=float),
+                ])
+            else:
+                tgt = np.asarray(target_state, dtype=float)
+            los, range_, los_unit, rel_vel = self._cy_los(r, v, tgt[:3], tgt[3:6])
+            return r, v, tgt, los, range_, los_unit, rel_vel
         r = np.asarray(interceptor_state["r"], dtype=float)
         v = np.asarray(interceptor_state["v"], dtype=float)
         if isinstance(target_state, dict):
@@ -57,10 +95,15 @@ class TerminalGuidance:
         return r, v, tgt, los, range_, los_unit, rel_vel
 
     def _in_fov(self, los_unit):
+        if self.use_cython and self._cy_in_fov is not None:
+            return self._cy_in_fov(los_unit, self.fov)
         angle = np.arccos(np.clip(los_unit[0], -1.0, 1.0))
         return angle <= self.fov
 
     def _pn_cmd(self, Vc, los_dot, target_accel=None):
+        if self.use_cython and self._cy_pn_cmd is not None:
+            ta = target_accel if target_accel is not None else np.zeros(3)
+            return self._cy_pn_cmd(self.N, Vc, los_dot, self.accel_limit, ta)
         a = self.N * Vc * los_dot
         if target_accel is not None:
             # Augmented PN: add (N/2) times target acceleration perpendicular to LOS.
@@ -74,6 +117,8 @@ class TerminalGuidance:
         approximation), with t_go estimated from range / closing speed. Steers
         the interceptor to null ZEM with an effective navigation ratio.
         """
+        if self.use_cython and self._cy_zem_cmd is not None:
+            return self._cy_zem_cmd(los, rel_vel, range_, self.N, self.zem_horizon, self.accel_limit)
         Vc = -np.dot(rel_vel, los) / max(range_, 1e-6)
         t_go = max(range_ / max(abs(Vc), 1e-3), self.zem_horizon * 0.1)
         t_go = min(t_go, self.zem_horizon)
@@ -92,6 +137,10 @@ class TerminalGuidance:
         kinematics (closed-form for this simple plant), evaluated over the
         ZEM horizon. u = -K x with K from continuous-time ARE.
         """
+        if self.use_cython and self._cy_sdre_mpc_cmd is not None:
+            return self._cy_sdre_mpc_cmd(los, rel_vel, range_, self.N, self.zem_horizon,
+                                         self.sdre_q_pos, self.sdre_q_vel, self.sdre_r_accel,
+                                         self.accel_limit)
         Vc = -np.dot(rel_vel, los) / max(range_, 1e-6)
         t_go = max(range_ / max(abs(Vc), 1e-3), self.zem_horizon * 0.1)
         t_go = min(t_go, self.zem_horizon)

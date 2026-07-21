@@ -45,6 +45,7 @@ class EOM6DOF:
         f107a=150.0,
         f107=150.0,
         ap=4.0,
+        use_cython=True,
     ):
         self.mass = mass
         self.inertia = np.array(inertia, dtype=float)
@@ -73,6 +74,35 @@ class EOM6DOF:
         self.mkv = None
         self.thrust_model = None
         self.separations = []
+        self.use_cython = use_cython
+        self._cy_eom = None
+        self._cy_guidance = None
+        if use_cython:
+            try:
+                from project_icarus.cython_kernels.eom_cython import (
+                    quat_normalize as cy_qn,
+                    quat_kinematics as cy_qk,
+                    quat_to_dcm as cy_q2dcm,
+                    rotate_body_to_inertial as cy_rb2i,
+                    rotate_inertial_to_body as cy_ri2b,
+                    geodetic_altitude as cy_geo_alt,
+                    gravity_inertial as cy_grav,
+                    gravity_gradient_torque as cy_ggt,
+                    newtonian_sideforce_moments_exo as cy_exo,
+                    linear_viscous_endo as cy_endo,
+                )
+                self._cy_qn = cy_qn
+                self._cy_qk = cy_qk
+                self._cy_q2dcm = cy_q2dcm
+                self._cy_rb2i = cy_rb2i
+                self._cy_ri2b = cy_ri2b
+                self._cy_geo_alt = cy_geo_alt
+                self._cy_grav = cy_grav
+                self._cy_ggt = cy_ggt
+                self._cy_exo = cy_exo
+                self._cy_endo = cy_endo
+            except Exception:
+                self.use_cython = False
 
     def set_mkv(self, mkv):
         self.mkv = mkv
@@ -123,86 +153,151 @@ class EOM6DOF:
         q = np.asarray(state["q"], dtype=float)
         omega = np.asarray(state["omega"], dtype=float)
         m = float(state["m"])
-        q = quat_normalize(q)
 
-        alt = _geodetic_altitude(r)
-        v_mag = np.linalg.norm(v)
-        rho = self.atmosphere.density_scalar(alt)
-        q_dyn = 0.5 * rho * v_mag**2
+        if self.use_cython and self._cy_qn is not None:
+            q = self._cy_qn(q)
+            alt = self._cy_geo_alt(r)
+            v_mag = np.linalg.norm(v)
+            rho = self.atmosphere.density_scalar(alt)
+            q_dyn = 0.5 * rho * v_mag**2
+            C = self._cy_q2dcm(q)
+            v_body = C.T @ v
+            v_body_mag = np.linalg.norm(v_body)
+            mach = v_mag / max(self.atmosphere.speed_of_sound_scalar(alt), 1e-6)
+            alpha = np.degrees(np.arctan2(v_body[2], v_body[0]))
+            beta = np.degrees(np.arcsin(np.clip(v_body[1] / max(v_body_mag, 1e-6), -1.0, 1.0)))
+            cd, cy, cm = surrogate_func(mach, alpha, beta, alt)
+            cn, cl_roll = self._analytic_cn_cl_roll(mach, alpha, beta, alt)
+            endo = alt < self.boundary_alt
+            if not endo:
+                cd *= 0.0
+                cy *= 0.0
+            f_aero_body = self.aerodynamic_forces(q_dyn, cd, cy)
+            m_aero_body = self.aerodynamic_moments(q_dyn, cm, cn, cl_roll, omega, v_body_mag)
+            f_thrust_body = np.zeros(3)
+            m_thrust_body = np.zeros(3)
+            mass_dot = 0.0
+            if self.thrust_model is not None:
+                thrust_vec = self.thrust_model.thrust_vector(t, state)
+                f_thrust_body = np.asarray(thrust_vec, dtype=float)
+                mass_dot = self.thrust_model.mass_rate(t, state)
+            if self.atmosphere.uses_nrlmsise:
+                try:
+                    lat, lon, _ = ecef_to_geodetic(r)
+                    self.atmosphere.set_exo_solar_geomagnetic(
+                        lat=lat, lon=lon, time=self.solar_time
+                    )
+                except Exception:
+                    pass
+            g_inertial = self._cy_grav(
+                r, use_j2=self.use_j2, use_high_order=self.use_high_order,
+                use_j3=self.use_j3, use_j4=self.use_j4, max_degree=self.max_degree,
+                use_third_body=self.use_third_body, use_tides=self.use_tides, t=t,
+            )
+            f_gravity_body = self._cy_ri2b(g_inertial, q)
+            f_total_body = f_aero_body + f_thrust_body
+            f_total_inertial = self._cy_rb2i(f_total_body, q)
+            m_gravity_body = self._cy_ggt(r, q, self.inertia_inv, use_j2=self.use_j2, cg=self.cg)
+            m_total_body = m_aero_body + m_thrust_body + m_gravity_body
+            dr_dt = v
+            dv_dt = f_total_inertial / max(m, 1e-6) + g_inertial
+            dq_dt = self._cy_qk(q, omega)
+            domega_dt = self.inertia_inv @ (m_total_body - np.cross(omega, self.inertia @ omega))
+            dm_dt = mass_dot
+            return {
+                "r": dr_dt,
+                "v": dv_dt,
+                "q": dq_dt,
+                "omega": domega_dt,
+                "m": dm_dt,
+            }
+        else:
+            q = quat_normalize(q)
 
-        C = quat_to_dcm(q)
-        v_body = C.T @ v
-        v_body_mag = np.linalg.norm(v_body)
-        mach = v_mag / max(self.atmosphere.speed_of_sound_scalar(alt), 1e-6)
+            alt = _geodetic_altitude(r)
+            v_mag = np.linalg.norm(v)
+            rho = self.atmosphere.density_scalar(alt)
+            q_dyn = 0.5 * rho * v_mag**2
 
-        alpha = np.degrees(np.arctan2(v_body[2], v_body[0]))
-        beta = np.degrees(np.arcsin(np.clip(v_body[1] / max(v_body_mag, 1e-6), -1.0, 1.0)))
+            C = quat_to_dcm(q)
+            v_body = C.T @ v
+            v_body_mag = np.linalg.norm(v_body)
+            mach = v_mag / max(self.atmosphere.speed_of_sound_scalar(alt), 1e-6)
 
-        cd, cy, cm = surrogate_func(mach, alpha, beta, alt)
-        cn, cl_roll = self._analytic_cn_cl_roll(mach, alpha, beta, alt)
+            alpha = np.degrees(np.arctan2(v_body[2], v_body[0]))
+            beta = np.degrees(np.arcsin(np.clip(v_body[1] / max(v_body_mag, 1e-6), -1.0, 1.0)))
 
-        endo = alt < self.boundary_alt
-        if not endo:
-            cd *= 0.0
-            cy *= 0.0
+            cd, cy, cm = surrogate_func(mach, alpha, beta, alt)
+            cn, cl_roll = self._analytic_cn_cl_roll(mach, alpha, beta, alt)
 
-        f_aero_body = self.aerodynamic_forces(q_dyn, cd, cy)
-        m_aero_body = self.aerodynamic_moments(q_dyn, cm, cn, cl_roll, omega, v_body_mag)
+            endo = alt < self.boundary_alt
+            if not endo:
+                cd *= 0.0
+                cy *= 0.0
 
-        f_thrust_body = np.zeros(3)
-        m_thrust_body = np.zeros(3)
-        mass_dot = 0.0
-        if self.thrust_model is not None:
-            thrust_vec = self.thrust_model.thrust_vector(t, state)
-            f_thrust_body = np.asarray(thrust_vec, dtype=float)
-            mass_dot = self.thrust_model.mass_rate(t, state)
+            f_aero_body = self.aerodynamic_forces(q_dyn, cd, cy)
+            m_aero_body = self.aerodynamic_moments(q_dyn, cm, cn, cl_roll, omega, v_body_mag)
 
-        if self.atmosphere.uses_nrlmsise:
-            try:
-                lat, lon, _ = ecef_to_geodetic(r)
-                self.atmosphere.set_exo_solar_geomagnetic(
-                    lat=lat, lon=lon, time=self.solar_time
-                )
-            except Exception:
-                pass
-        g_inertial = gravity_inertial(
-            r, use_j2=self.use_j2, use_high_order=self.use_high_order,
-            use_j3=self.use_j3, use_j4=self.use_j4, max_degree=self.max_degree,
-            use_third_body=self.use_third_body, use_tides=self.use_tides, t=t,
-        )
-        f_gravity_body = rotate_inertial_to_body(g_inertial, q)
-        # ``gravity_inertial`` returns an acceleration; aero/thrust are forces and
-        # are divided by mass below. Apply gravity as an acceleration directly so
-        # it is not erroneously mass-scaled.
-        f_total_body = f_aero_body + f_thrust_body
+            f_thrust_body = np.zeros(3)
+            m_thrust_body = np.zeros(3)
+            mass_dot = 0.0
+            if self.thrust_model is not None:
+                thrust_vec = self.thrust_model.thrust_vector(t, state)
+                f_thrust_body = np.asarray(thrust_vec, dtype=float)
+                mass_dot = self.thrust_model.mass_rate(t, state)
 
-        f_total_inertial = rotate_body_to_inertial(f_total_body, q)
-        m_gravity_body = gravity_gradient_torque(
-            r, q, self.inertia_inv, cg=self.cg, use_j2=self.use_j2
-        )
-        m_total_body = m_aero_body + m_thrust_body + m_gravity_body
+            if self.atmosphere.uses_nrlmsise:
+                try:
+                    lat, lon, _ = ecef_to_geodetic(r)
+                    self.atmosphere.set_exo_solar_geomagnetic(
+                        lat=lat, lon=lon, time=self.solar_time
+                    )
+                except Exception:
+                    pass
+            g_inertial = gravity_inertial(
+                r, use_j2=self.use_j2, use_high_order=self.use_high_order,
+                use_j3=self.use_j3, use_j4=self.use_j4, max_degree=self.max_degree,
+                use_third_body=self.use_third_body, use_tides=self.use_tides, t=t,
+            )
+            f_gravity_body = rotate_inertial_to_body(g_inertial, q)
+            # ``gravity_inertial`` returns an acceleration; aero/thrust are forces and
+            # are divided by mass below. Apply gravity as an acceleration directly so
+            # it is not erroneously mass-scaled.
+            f_total_body = f_aero_body + f_thrust_body
 
-        dr_dt = v
-        dv_dt = f_total_inertial / max(m, 1e-6) + g_inertial
-        dq_dt = quat_kinematics(q, omega)
-        domega_dt = self.inertia_inv @ (m_total_body - np.cross(omega, self.inertia @ omega))
-        dm_dt = mass_dot
+            f_total_inertial = rotate_body_to_inertial(f_total_body, q)
+            m_gravity_body = gravity_gradient_torque(
+                r, q, self.inertia_inv, use_j2=self.use_j2, cg=self.cg
+            )
+            m_total_body = m_aero_body + m_thrust_body + m_gravity_body
 
-        return {
-            "r": dr_dt,
-            "v": dv_dt,
-            "q": dq_dt,
-            "omega": domega_dt,
-            "m": dm_dt,
-        }
+            dr_dt = v
+            dv_dt = f_total_inertial / max(m, 1e-6) + g_inertial
+            dq_dt = quat_kinematics(q, omega)
+            domega_dt = self.inertia_inv @ (m_total_body - np.cross(omega, self.inertia @ omega))
+            dm_dt = mass_dot
+
+            return {
+                "r": dr_dt,
+                "v": dv_dt,
+                "q": dq_dt,
+                "omega": domega_dt,
+                "m": dm_dt,
+            }
 
     def _analytic_cn_cl_roll(self, mach, alpha, beta, alt):
-        from ..aero.aero_analytical import newtonian_sideforce_moments_exo, linear_viscous_endo
         blend = np.clip((alt - (self.boundary_alt - self.taper_width)) /
                         (2.0 * self.taper_width), 0.0, 1.0)
         blend = 0.5 * (1.0 - np.cos(np.pi * blend))
-        _, cn_exo, cl_roll_exo = newtonian_sideforce_moments_exo(mach, alpha, beta)
-        _, _, _, cn_endo, cl_roll_endo = linear_viscous_endo(mach, alpha, beta)
+        if self.use_cython and self._cy_exo is not None and self._cy_endo is not None:
+            cn_exo = self._cy_exo(mach, alpha, beta)[1]
+            cl_roll_exo = self._cy_exo(mach, alpha, beta)[2]
+            cn_endo = self._cy_endo(mach, alpha, beta)[3]
+            cl_roll_endo = self._cy_endo(mach, alpha, beta)[4]
+        else:
+            from ..aero.aero_analytical import newtonian_sideforce_moments_exo, linear_viscous_endo
+            _, cn_exo, cl_roll_exo = newtonian_sideforce_moments_exo(mach, alpha, beta)
+            _, _, _, cn_endo, cl_roll_endo = linear_viscous_endo(mach, alpha, beta)
         cn = cn_endo * (1.0 - blend) + cn_exo * blend
         cl_roll = cl_roll_endo * (1.0 - blend) + cl_roll_exo * blend
         return cn, cl_roll

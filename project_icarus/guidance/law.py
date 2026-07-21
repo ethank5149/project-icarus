@@ -28,6 +28,7 @@ class GuidanceLaw:
         self.midcourse = MidcourseGuidance(
             N=self.config.midcourse_n,
             accel_limit=self.config.midcourse_accel_limit,
+            use_cython=True,
         )
         self.terminal = TerminalGuidance(
             N=self.config.terminal_n,
@@ -40,6 +41,7 @@ class GuidanceLaw:
             sdre_q_pos=self.config.sdre_q_pos,
             sdre_q_vel=self.config.sdre_q_vel,
             sdre_r_accel=self.config.sdre_r_accel,
+            use_cython=True,
         )
         if self.config.ukf_enabled:
             seeker_cfg = SeekerConfig(

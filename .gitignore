@@ -12,3 +12,8 @@ coloring_files/
 reports/
 .openmdao_out
 *.db
+
+# Cython build artifacts
+build/
+project_icarus/cython_kernels/*.c
+project_icarus/cython_kernels/*.so
