@@ -383,7 +383,7 @@ class BallisticScenario:
     cd: float = 0.3
     area: float = 0.02
     mass: float = 1000.0
-    geometry_key: str = "generic_rv"
+    geometry_key: str = "rs28_sarmat"
     atmosphere: Optional[Atmosphere] = None
     wind_model: Optional[Any] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -970,7 +970,7 @@ class SuppressedScenario:
     adaptive: bool = False
     atmosphere: Optional[Atmosphere] = None
     wind_model: Optional[Any] = None
-    geometry_key: str = "generic_rv"
+    geometry_key: str = "rs28_sarmat"
     metadata: Dict[str, Any] = field(default_factory=dict)
     _wind_cache_key: Any = field(default=None, repr=False, compare=False)
     _wind_cache_val: Any = field(default=None, repr=False, compare=False)
@@ -1140,7 +1140,7 @@ class SwarmScenario:
     n_payloads: int = 3
     spread_deg: float = 2.0
     bus_geometry_key: str = "swarm_bus"
-    payload_geometry_keys: List[str] = field(default_factory=lambda: ["generic_rv"])
+    payload_geometry_keys: List[str] = field(default_factory=lambda: ["rs28_sarmat"])
     wind_model: Optional[Any] = None
     geometry_key: str = "swarm_bus"
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -1241,7 +1241,7 @@ class DecoyThreatScenario:
     decoys: List[Any] = field(default_factory=list)
     release_t: float = 200.0
     wind_model: Optional[Any] = None
-    geometry_key: str = "generic_rv"
+    geometry_key: str = "rs28_sarmat"
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -1483,6 +1483,252 @@ class CruiseMissileScenario:
         r0 = np.array([R_EARTH + launch_alt_km * 1e3, 0.0, 0.0])
         v0 = np.array([0.0, speed_mach * 340.0, 0.0])
         return cls(r0=r0, v0=v0, cruise_speed_mach=speed_mach)
+
+
+@dataclass
+class SarmatScenario(FOBSScenario):
+    """RS-28 Sarmat-specific threat profile (2C.1).
+
+    Extends :class:`FOBSScenario` with modeling hooks for the Sarmat's
+    reported countermeasures and penetration-aid capability:
+
+    - **Shortened / mortar boost**: cold-launch pop-up followed by a staged
+      first-stage ignition that reduces the infrared boost signature below
+      SBIRS detection thresholds.
+    - **Post-boost bus (PBB)**: after parking-orbit insertion the bus can
+      release up to 15 MIRVs plus decoys/chaff at programmed nodes along the
+      trajectory, depressing the reentry barycenter.
+    - **Midcourse trajectory alteration**: the bus can vary the deorbit
+      impulse and reentry corridor between launches, including depressed
+      trajectories that skip the standard FOBS high-apogee path.
+    - **Decoy cloud**: penetrations aids with lower ballistic coefficients
+      than the RV to complicate seeker discrimination.
+
+    Each knob is optional; defaults produce a standard FOBS trajectory so
+    existing Monte-Carlo sweeps remain comparable.
+    """
+
+    target_type: str = "sarmat"
+    geometry_key: str = "rs28_sarmat"
+    boost_profile: str = "shortened"  # "standard" | "shortened" | "mortar"
+    boost_duration_s: float = 80.0
+    thrust_profile: Optional[List[Tuple[float, float]]] = None
+    mortar_pop_height_m: float = 20.0
+    ir_signature_scale: float = 0.3
+    midcourse_profile: str = "standard"  # "standard" | "depressed" | "fobs-loop"
+    midcourse_alteration_delta_v: float = 0.0
+    midcourse_alteration_times: Optional[np.ndarray] = None
+    pbb_warheads: int = 10
+    pbb_decoys: int = 50
+    pbb_release_alt_km: float = 120.0
+    decoy_release_times: Optional[np.ndarray] = None
+
+    _warheads: List = field(default_factory=list, repr=False)
+    _decoys: List = field(default_factory=list, repr=False)
+    _pbb_released: bool = False
+
+    def __post_init__(self):
+        super().__post_init__()
+        self._pbb_released = False
+        self._warheads = []
+        self._decoys = []
+        if self.decoy_release_times is None:
+            spread = np.linspace(0.0, 60.0, self.pbb_decoys)
+            self.decoy_release_times = spread
+
+    def _mortar_boost(self, r0, v0):
+        """Pop up from silo, then ignite main stage."""
+        r = r0.astype(float).copy()
+        v = v0.astype(float).copy()
+        dt = 0.05
+        t_pop = np.sqrt(2.0 * self.mortar_pop_height_m / 50.0)
+        n_pop = max(int(t_pop / dt), 1)
+        for _ in range(n_pop):
+            a = _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
+                                use_j4=self.use_j4, use_high_order=self.use_high_order,
+                                use_third_body=self.use_third_body, use_tides=self.use_tides,
+                                max_degree=self.max_degree) + np.array([50.0, 0.0, 0.0])
+            v = v + a * dt
+            r = r + v * dt
+        return r, v
+
+    def _staged_thrust(self, t):
+        """Return thrust for a staged Sarmat burn if a profile is provided."""
+        if self.thrust_profile is not None:
+            thrust = 0.0
+            for t_start, t_end, T in self.thrust_profile:
+                if t_start <= t < t_end:
+                    thrust = T
+            return thrust
+        return self.thrust
+
+    def _apply_midcourse_alteration(self, r, v, t):
+        """Apply an impulsive midcourse delta-v if scheduled."""
+        if self.midcourse_alteration_times is None:
+            return r, v
+        for i, t_alt in enumerate(self.midcourse_alteration_times):
+            if abs(t - t_alt) < 0.5:
+                # In-plane nudge along velocity to alter reentry corridor.
+                vmag = np.linalg.norm(v)
+                if vmag > 1e-6:
+                    v = v + (v / vmag) * self.midcourse_alteration_delta_v
+        return r, v
+
+    def _full_trajectory(self):
+        if self._cache is not None:
+            return self._cache
+
+        if self.boost_profile == "mortar":
+            r, v = self._mortar_boost(self.r0, self.v0)
+        else:
+            r = self.r0.astype(float).copy()
+            v = self.v0.astype(float).copy()
+
+        boost_dur = self.boost_duration_s if self.boost_profile != "standard" else self._boost_duration
+        dt_boost = 0.05
+        boost_t = np.arange(0.0, boost_dur + dt_boost, dt_boost)
+        boost_states = []
+        for ti in boost_t:
+            boost_states.append(np.concatenate([r.copy(), v.copy()]))
+            thrust = self._staged_thrust(ti)
+            a = _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
+                                use_j4=self.use_j4, use_high_order=self.use_high_order,
+                                use_third_body=self.use_third_body, use_tides=self.use_tides,
+                                max_degree=self.max_degree) + np.array([thrust, 0.0, 0.0])
+            if self.wind_model is not None and _ground_altitude(r) < 150e3:
+                a = a + self._wind_accel(r, v, ti, dt_boost)
+            v = v + a * dt_boost
+            r = r + v * dt_boost
+        boost_states.append(np.concatenate([r.copy(), v.copy()]))
+        r_coast = boost_states[-1][:3].copy()
+        v_coast = boost_states[-1][3:].copy()
+        t0_coast = boost_dur
+
+        r_i = np.linalg.norm(r_coast)
+        v_circular = np.sqrt(MU_EARTH / r_i)
+        v_coast_dir = v_coast / max(np.linalg.norm(v_coast), 1e-12)
+        v_coast = v_coast_dir * v_circular
+
+        y0_coast = np.concatenate([r_coast, v_coast])
+        apoapsis_km = self.apoapsis_km if self.midcourse_profile != "depressed" else 80.0
+
+        def rhs_coast(ti, y):
+            r, v = y[:3], y[3:]
+            a = _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
+                                use_j4=self.use_j4, use_high_order=self.use_high_order,
+                                use_third_body=self.use_third_body, use_tides=self.use_tides,
+                                max_degree=self.max_degree)
+            r, v = self._apply_midcourse_alteration(r, v, ti)
+            if self.wind_model is not None and _ground_altitude(r) < 150e3:
+                a = a + self._wind_accel(r, v, ti, 0.05)
+            return np.concatenate([v, a])
+
+        dt_coast = 0.05
+        coast_t_eval = np.arange(0.0, self._coast_duration + dt_coast, dt_coast)
+        sol_coast = solve_ivp(rhs_coast, (0.0, self._coast_duration), y0_coast,
+                              method="RK45", t_eval=coast_t_eval,
+                              rtol=1e-9, atol=1e-12)
+        coast_states = sol_coast.y.T if sol_coast.y.size > 0 else np.array([y0_coast])
+
+        r_deorbit = coast_states[-1][:3].copy()
+        v_deorbit_circular = coast_states[-1][3:].copy()
+        v_deorbit_dir = v_deorbit_circular / max(np.linalg.norm(v_deorbit_circular), 1e-12)
+
+        r_a = np.linalg.norm(r_deorbit)
+        r_p = R_EARTH + 80e3
+        a_t = (r_a + r_p) / 2.0
+        v_a = np.sqrt(MU_EARTH * (2.0 / r_a - 1.0 / a_t))
+        delta_v = v_circular - v_a
+
+        retrograde_dir = -v_deorbit_dir
+        to_aim = self._aim_point - r_deorbit
+        to_aim_unit = to_aim / max(np.linalg.norm(to_aim), 1e-6)
+
+        orbital_plane_normal = np.cross(r_deorbit, v_deorbit_circular)
+        orbital_plane_normal = orbital_plane_normal / max(np.linalg.norm(orbital_plane_normal), 1e-12)
+        to_aim_in_plane = to_aim_unit - np.dot(to_aim_unit, orbital_plane_normal) * orbital_plane_normal
+        to_aim_in_plane_norm = np.linalg.norm(to_aim_in_plane)
+        if to_aim_in_plane_norm > 1e-6:
+            to_aim_in_plane = to_aim_in_plane / to_aim_in_plane_norm
+        else:
+            to_aim_in_plane = retrograde_dir
+
+        burn_dir = 0.6 * retrograde_dir + 0.4 * to_aim_in_plane
+        burn_dir = burn_dir / max(np.linalg.norm(burn_dir), 1e-12)
+        v_deorbit = v_deorbit_circular + burn_dir * delta_v * self.deorbit_dv
+
+        r_EI = R_EARTH + 100e3
+        v_EI = np.sqrt(v_a**2 + 2.0 * MU_EARTH * (1.0 / r_EI - 1.0 / r_a))
+        cos_gamma_EI = (r_a * v_a) / (r_EI * v_EI)
+        gamma_EI = -np.arccos(np.clip(cos_gamma_EI, -1.0, 1.0))
+
+        # PBB: release warheads + decoys at parking-orbit altitude before deorbit
+        self._release_pbb(r_coast, v_coast, coast_states, coast_t_eval)
+
+        engagement_end = self.metadata.get("engagement_end", 1200.0)
+        guided_times, guided_states = simulate_guided_threat(
+            r_deorbit, v_deorbit, self._aim_point,
+            vehicle=self.vehicle, guidance_law=self.guidance,
+            t0=t0_coast + self._coast_duration,
+            t_end=min(engagement_end, t0_coast + self._coast_duration + 600.0),
+        )
+
+        all_t = np.concatenate([boost_t, t0_coast + coast_t_eval, guided_times])
+        all_s = np.concatenate([
+            np.array(boost_states),
+            coast_states,
+            guided_states.T,
+        ], axis=0)
+        self._cache = (all_t, all_s)
+        return self._cache
+
+    def _release_pbb(self, r_bus, v_bus, coast_states, coast_times):
+        """Populate lightweight warhead and decoy scenarios from bus state."""
+        self._pbb_released = True
+        bus_alt = np.linalg.norm(r_bus) - R_EARTH
+        if bus_alt < self.pbb_release_alt_km * 1e3:
+            return
+        n = max(self.pbb_warheads, 1)
+        spread_deg = 2.0
+        for i in range(n):
+            angle = np.radians(i * spread_deg)
+            dr = np.array([np.cos(angle), np.sin(angle), 0.0]) * 50.0
+            dv = np.array([-np.sin(angle), np.cos(angle), 0.0]) * 5.0
+            self._warheads.append(BallisticScenario(
+                r0=r_bus + dr, v0=v_bus + dv,
+                geometry_key="threat_rv",
+                mass=800.0, area=0.02, cd=0.3,
+                use_j2=self.use_j2,
+            ))
+        for i in range(max(self.pbb_decoys, 0)):
+            angle = np.radians(i * 3.0 + 0.5)
+            dr = np.array([np.cos(angle), np.sin(angle), 0.1 * np.sin(angle)]) * 80.0
+            dv = np.array([-np.sin(angle), np.cos(angle), 0.05 * np.cos(angle)]) * 8.0
+            self._decoys.append(BallisticScenario(
+                r0=r_bus + dr, v0=v_bus + dv,
+                geometry_key="signature_balloon_decoy",
+                mass=30.0, area=0.5, cd=1.2,
+                use_j2=self.use_j2,
+            ))
+
+    def warhead_states(self, t: float) -> List[np.ndarray]:
+        if not self._pbb_released:
+            self._full_trajectory()
+        return [w.propagate(t) for w in self._warheads]
+
+    def decoy_states(self, t: float) -> List[np.ndarray]:
+        if not self._pbb_released:
+            self._full_trajectory()
+        return [d.propagate(t) for d in self._decoys]
+
+    def discrimination_features(self, t: float, seed: int = 0) -> List[np.ndarray]:
+        rng = np.random.default_rng(seed)
+        feats = []
+        for w in self._warheads:
+            feats.append(np.array([1.0, 1.0, 45.0, 1.0]) + rng.normal(0.0, 0.1, 4))
+        for d in self._decoys:
+            feats.append(np.array([0.4, 0.6, 35.0, 0.2]) + rng.normal(0.0, 0.1, 4))
+        return feats
 
 
 @dataclass

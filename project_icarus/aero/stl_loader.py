@@ -310,7 +310,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="kh101",
         notes="OSINT Kh-101 cruise missile. Normalized: centered, +Z axis, 7.446 m.",
-        original_filename="kh-101-cruise-missile.stl",
+        original_filename="kh101.stl",
         raw_scale=0.001,
     ),
     "ss18_satan": VehicleSTLInfo(
@@ -319,7 +319,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="ss18_satan",
         notes="OSINT RS-36 SS-18 Satan. Normalized: centered, +Z axis, 34.004 m.",
-        original_filename="ss-18-satan-missile.stl",
+        original_filename="ss18-satan.stl",
         raw_scale=2.0181,
     ),
     "topol_m": VehicleSTLInfo(
@@ -328,7 +328,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="topol_m",
         notes="OSINT RT-2PM2 Topol-M. Normalized: centered, +Z axis, 22.708 m.",
-        original_filename="topol-m-missile.stl",
+        original_filename="topolm.stl",
         raw_scale=2.4705,
     ),
     "df41": VehicleSTLInfo(
@@ -337,7 +337,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="df41",
         notes="OSINT DF-41. Normalized: centered, +Z axis, 16.503 m.",
-        original_filename="df-41-missile.stl",
+        original_filename="df41.stl",
         raw_scale=2.2694,
     ),
     "df5": VehicleSTLInfo(
@@ -346,7 +346,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="df5",
         notes="OSINT DF-5A. Normalized: centered, +Z axis, 32.004 m.",
-        original_filename="df-5a-missile.stl",
+        original_filename="df5a.stl",
         raw_scale=1.1461,
     ),
     "df31": VehicleSTLInfo(
@@ -355,7 +355,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="df31",
         notes="OSINT DF-31AG. Normalized: centered, +Z axis, 12.999 m.",
-        original_filename="df-31ag-missile.stl",
+        original_filename="df31ag.stl",
         raw_scale=1.5758,
     ),
     "kinzhal": VehicleSTLInfo(
@@ -364,7 +364,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="kinzhal",
         notes="OSINT Kh-47M2 Kinzhal. Normalized: centered, +Z axis, 7.798 m.",
-        original_filename="kh47m2-missile.stl",
+        original_filename="kh47m2.stl",
         raw_scale=0.4830,
     ),
     "aim120": VehicleSTLInfo(
@@ -373,7 +373,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="aim120",
         notes="OSINT AIM-120 (AMRAAM). Normalized: centered, +Z axis, 3.650 m.",
-        original_filename="aim-120-amraam-missile.stl",
+        original_filename="aim120-amraam.stl",
         raw_scale=0.0106,
     ),
     "atacms": VehicleSTLInfo(
@@ -382,7 +382,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="atacms",
         notes="OSINT MGM-140 (ATACMS). Normalized: centered, +Z axis, 4.000 m.",
-        original_filename="mgm-140-atacms-missile.stl",
+        original_filename="mgm140-atacms.stl",
         raw_scale=0.0028,
     ),
     "tomahawk": VehicleSTLInfo(
@@ -391,7 +391,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="tomahawk",
         notes="OSINT BGM-109 (Tomahawk). Normalized: centered, +Z axis, 5.560 m.",
-        original_filename="bgm-109-tomahawk-cruise-missile.stl",
+        original_filename="bgm109-tomahawk.stl",
         raw_scale=0.0429,
     ),
     "harpoon": VehicleSTLInfo(
@@ -400,7 +400,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="harpoon",
         notes="OSINT RGM-84 (Harpoon). Normalized: centered, +Z axis, 4.600 m.",
-        original_filename="rgm-84-harpoon-missile.stl",
+        original_filename="rgm84-harpoon.stl",
         raw_scale=0.3803,
     ),
     "hwasong12": VehicleSTLInfo(
@@ -409,7 +409,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="hwasong12",
         notes="OSINT Hwasong-12 (KN-17). Normalized: centered, +Z axis, 17.400 m.",
-        original_filename="hwasong-12-missile.stl",
+        original_filename="hwasong12.stl",
         raw_scale=1.0886,
     ),
     "hwasong14": VehicleSTLInfo(
@@ -418,7 +418,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="hwasong14",
         notes="OSINT Hwasong-14 (KN-20). Normalized: centered, +Z axis, 19.800 m.",
-        original_filename="hwasong-14-missile.stl",
+        original_filename="hwasong14.stl",
         raw_scale=1.1161,
     ),
     "hwasong15": VehicleSTLInfo(
@@ -427,7 +427,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="hwasong15",
         notes="OSINT Hwasong-15 (KN-22). Normalized: centered, +Z axis, 22.000 m.",
-        original_filename="hwasong-15-missile.stl",
+        original_filename="hwasong15.stl",
         raw_scale=1.1180,
     ),
     "hwasong17": VehicleSTLInfo(
@@ -436,7 +436,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="hwasong17",
         notes="OSINT Hwasong-17. Normalized: centered, +Z axis, 25.000 m.",
-        original_filename="hwasong-17-missile.stl",
+        original_filename="hwasong17.stl",
         raw_scale=2.1315,
     ),
     "kh47m2": VehicleSTLInfo(
@@ -445,7 +445,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="kh47m2",
         notes="OSINT Kh-47M2 (Kinzhal). Normalized: centered, +Z axis, 8.000 m.",
-        original_filename="kh47m2-missile.stl",
+        original_filename="kh47m2.stl",
         raw_scale=0.4955,
     ),
     "slam": VehicleSTLInfo(
@@ -454,7 +454,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="slam",
         notes="OSINT SLAM (Project Pluto). Normalized: centered, +Z axis.",
-        original_filename="project-pluto-slam-cruise-missile.stl",
+        original_filename="project-pluto-slam.stl",
         raw_scale=1.0000,
     ),
     "skybolt": VehicleSTLInfo(
@@ -463,7 +463,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="skybolt",
         notes="OSINT GAM-87 (AGM-48) Skybolt. Normalized: centered, +Z axis, 11.660 m.",
-        original_filename="skybolt-missile.stl",
+        original_filename="skybolt.stl",
         raw_scale=0.9777,
     ),
     "titan2": VehicleSTLInfo(
@@ -472,7 +472,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="titan2",
         notes="OSINT LGM-25C Titan II. Normalized: centered, +Z axis, 32.920 m.",
-        original_filename="titan-ii-missile.stl",
+        original_filename="titan-ii.stl",
         raw_scale=1.2953,
     ),
     "lance": VehicleSTLInfo(
@@ -481,7 +481,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="lance",
         notes="OSINT MGM-52 (Lance). Normalized: centered, +Z axis, 6.410 m.",
-        original_filename="mgm52-missile.stl",
+        original_filename="mgm52.stl",
         raw_scale=0.5572,
     ),
     "corporal": VehicleSTLInfo(
@@ -490,7 +490,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="corporal",
         notes="OSINT MGM-5 Corporal. Normalized: centered, +Z axis, 13.700 m.",
-        original_filename="mgm-5-corporal-missile.stl",
+        original_filename="mgm5-corporal.stl",
         raw_scale=0.0010,
     ),
     "midgetman": VehicleSTLInfo(
@@ -499,7 +499,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="midgetman",
         notes="OSINT MGM-134A (Midgetman). Normalized: centered, +Z axis, 14.000 m.",
-        original_filename="mgm-134a-midgetman-missile.stl",
+        original_filename="mgm134a-midgetman.stl",
         raw_scale=1.2058,
     ),
     "pac2": VehicleSTLInfo(
@@ -508,7 +508,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="pac2",
         notes="OSINT MIM-104 PAC-2 (Patriot). Normalized: centered, +Z axis, 5.790 m.",
-        original_filename="pac-2-missile.stl",
+        original_filename="pac2.stl",
         raw_scale=0.3944,
     ),
     "pac3_cri": VehicleSTLInfo(
@@ -517,7 +517,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="pac3_cri",
         notes="OSINT MIM-104 PAC-3 CRI. Normalized: centered, +Z axis, 5.200 m.",
-        original_filename="pac-3-cri-missile.stl",
+        original_filename="pac3cri.stl",
         raw_scale=0.3505,
     ),
     "pac3_mse": VehicleSTLInfo(
@@ -526,7 +526,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="pac3_mse",
         notes="OSINT MIM-104 PAC-3 MSE. Normalized: centered, +Z axis, 5.200 m.",
-        original_filename="pac-3-mse-missile.stl",
+        original_filename="pac3mse.stl",
         raw_scale=0.3494,
     ),
     "redstone": VehicleSTLInfo(
@@ -535,7 +535,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="redstone",
         notes="OSINT PGM-11 Redstone. Normalized: centered, +Z axis, 21.100 m.",
-        original_filename="pgm11redstone-missile.stl",
+        original_filename="pgm11-redstone.stl",
         raw_scale=1.7684,
     ),
     "v2": VehicleSTLInfo(
@@ -544,7 +544,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="v2",
         notes="OSINT V-2 (A-4 rocket). Normalized: centered, +Z axis, 14.000 m.",
-        original_filename="v2-missile.stl",
+        original_filename="v2.stl",
         raw_scale=0.8800,
     ),
     "ababeel": VehicleSTLInfo(
@@ -553,7 +553,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="ababeel",
         notes="OSINT Ababeel. Normalized: centered, +Z axis.",
-        original_filename="ababeel-missile.stl",
+        original_filename="ababeel.stl",
         raw_scale=1.0000,
     ),
     "jassm": VehicleSTLInfo(
@@ -562,7 +562,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="jassm",
         notes="OSINT AGM-158 (JASSM). Normalized: centered, +Z axis, 4.270 m.",
-        original_filename="agm-158-cruise-missile.stl",
+        original_filename="agm158.stl",
         raw_scale=0.0247,
     ),
     "sram": VehicleSTLInfo(
@@ -571,7 +571,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="sram",
         notes="OSINT AGM-69A (SRAM). Normalized: centered, +Z axis, 4.830 m.",
-        original_filename="agm-69a-sram-missile.stl",
+        original_filename="agm69a-sram.stl",
         raw_scale=0.0288,
     ),
     "thor": VehicleSTLInfo(
@@ -580,7 +580,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="thor",
         notes="OSINT PGM-17 Thor. Normalized: centered, +Z axis, 19.810 m.",
-        original_filename="thor-missile.stl",
+        original_filename="thor.stl",
         raw_scale=1.9973,
     ),
     "jupiter": VehicleSTLInfo(
@@ -589,7 +589,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="jupiter",
         notes="OSINT PGM-19 Jupiter. Normalized: centered, +Z axis, 18.390 m.",
-        original_filename="jupiterirbm-missile.stl",
+        original_filename="jupiter.stl",
         raw_scale=1.8035,
     ),
     "titan1": VehicleSTLInfo(
@@ -598,7 +598,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="titan1",
         notes="OSINT HGM-25A Titan I. Normalized: centered, +Z axis, 29.870 m.",
-        original_filename="titan-i-missile.stl",
+        original_filename="titan-i.stl",
         raw_scale=1.2311,
     ),
     "pershing2": VehicleSTLInfo(
@@ -607,7 +607,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="pershing2",
         notes="OSINT Pershing II. Normalized: centered, +Z axis, 10.610 m.",
-        original_filename="pershing-ii-missile.stl",
+        original_filename="pershing-ii.stl",
         raw_scale=0.1262,
     ),
     "qiam1": VehicleSTLInfo(
@@ -616,7 +616,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="qiam1",
         notes="OSINT Qiam-1. Normalized: centered, +Z axis, 11.850 m.",
-        original_filename="qiam-1iran-missile.stl",
+        original_filename="qiam-1.stl",
         raw_scale=1.1810,
     ),
     "r14": VehicleSTLInfo(
@@ -625,7 +625,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="r14",
         notes="OSINT R-14 (SS-5 Skean). Normalized: centered, +Z axis, 24.400 m.",
-        original_filename="r-14-missile.stl",
+        original_filename="r14.stl",
         raw_scale=1.5788,
     ),
     "scudb": VehicleSTLInfo(
@@ -634,7 +634,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="scudb",
         notes="OSINT Scud-B (R-17E). Normalized: centered, +Z axis, 11.250 m.",
-        original_filename="scud-b-missile.stl",
+        original_filename="scudb.stl",
         raw_scale=0.9742,
     ),
     "shaheen3": VehicleSTLInfo(
@@ -643,7 +643,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="shaheen3",
         notes="OSINT Shaheen-3. Normalized: centered, +Z axis, 19.300 m.",
-        original_filename="shaheen-3-missile.stl",
+        original_filename="shaheen3.stl",
         raw_scale=2.4610,
     ),
 
@@ -653,7 +653,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="df3a",
         notes="OSINT DF-3A (CSS-2). Normalized: centered, +Z axis, 24.000 m.",
-        original_filename="df-3a-missile.stl",
+        original_filename="df3a.stl",
         raw_scale=1.1093,
     ),
     "df3": VehicleSTLInfo(
@@ -662,7 +662,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="df3",
         notes="OSINT DF-3 (CSS-2). Normalized: centered, +Z axis, 24.000 m.",
-        original_filename="df-3-missile.stl",
+        original_filename="df3.stl",
         raw_scale=1.1853,
     ),
     "df5a": VehicleSTLInfo(
@@ -671,7 +671,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="df5a",
         notes="OSINT DF-5A (CSS-4). Normalized: centered, +Z axis, 32.600 m.",
-        original_filename="df-5a-missile.stl",
+        original_filename="df5a.stl",
         raw_scale=1.1674,
     ),
     "df5b": VehicleSTLInfo(
@@ -680,7 +680,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="df5b",
         notes="OSINT DF-5B (CSS-4). Normalized: centered, +Z axis, 32.600 m.",
-        original_filename="df-5b-missile.stl",
+        original_filename="df5b.stl",
         raw_scale=1.1577,
     ),
     "df31ag": VehicleSTLInfo(
@@ -689,7 +689,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="df31ag",
         notes="OSINT DF-31AG. Normalized: centered, +Z axis, 14.500 m.",
-        original_filename="df-31ag-missile.stl",
+        original_filename="df31ag.stl",
         raw_scale=1.7578,
     ),
     "mx": VehicleSTLInfo(
@@ -698,7 +698,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="mx",
         notes="OSINT LGM-118 (MX). Normalized: centered, +Z axis, 21.100 m.",
-        original_filename="lgm118-missile.stl",
+        original_filename="lgm118.stl",
         raw_scale=2.8620,
     ),
     "minuteman2": VehicleSTLInfo(
@@ -707,7 +707,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="minuteman2",
         notes="OSINT LGM-30F (Minuteman II). Normalized: centered, +Z axis, 18.200 m.",
-        original_filename="lgm-30f-missile.stl",
+        original_filename="lgm30f.stl",
         raw_scale=2.1037,
     ),
     "minuteman3": VehicleSTLInfo(
@@ -716,7 +716,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="minuteman3",
         notes="OSINT LGM-30G (Minuteman III). Normalized: centered, +Z axis, 18.200 m.",
-        original_filename="lgm-30g-missile.stl",
+        original_filename="lgm30g.stl",
         raw_scale=1.9320,
     ),
     "minuteman1a": VehicleSTLInfo(
@@ -725,7 +725,7 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="minuteman1a",
         notes="OSINT LGM-30A (Minuteman I). Normalized: centered, +Z axis, 16.450 m.",
-        original_filename="lgm-30a-missile.stl",
+        original_filename="lgm30a.stl",
         raw_scale=2.0555,
     ),
     "minuteman1b": VehicleSTLInfo(
@@ -734,8 +734,17 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         scale=1.0,
         proxy_for="minuteman1b",
         notes="OSINT LGM-30B (Minuteman I). Normalized: centered, +Z axis, 17.000 m.",
-        original_filename="lgm-30b-missile.stl",
+        original_filename="lgm30b.stl",
         raw_scale=2.0625,
+    ),
+    "rs28_sarmat": VehicleSTLInfo(
+        key="rs28_sarmat",
+        filename="model.stl",
+        scale=1.0,
+        proxy_for="rs28_sarmat",
+        notes="OSINT RS-28 Sarmat. Normalized: centered, +Z axis, 35.000 m.",
+        original_filename="rs28-sarmat.stl",
+        raw_scale=0.025392,
     ),
 }
 

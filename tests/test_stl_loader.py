@@ -23,7 +23,7 @@ def _primary_z_aligned(vertices: np.ndarray) -> bool:
 
 class TestReadStl:
     def test_kh101_binary_loads(self):
-        vertices, faces = read_stl("reference/models/kh-101-cruise-missile.stl")
+        vertices, faces = read_stl("reference/models/kh101.stl")
         assert vertices.ndim == 2 and vertices.shape[1] == 3
         assert faces.ndim == 2 and faces.shape[1] == 3
         assert vertices.shape[0] > 0
@@ -32,45 +32,45 @@ class TestReadStl:
         assert faces.max() < vertices.shape[0]
 
     def test_returns_numpy_arrays(self):
-        vertices, faces = read_stl("reference/models/kh-101-cruise-missile.stl")
+        vertices, faces = read_stl("reference/models/kh101.stl")
         assert isinstance(vertices, np.ndarray)
         assert isinstance(faces, np.ndarray)
 
     def test_kh101_has_15690_faces(self):
-        vertices, faces = read_stl("reference/models/kh-101-cruise-missile.stl")
+        vertices, faces = read_stl("reference/models/kh101.stl")
         assert faces.shape[0] == 15690
 
 
 class TestNormalizeStl:
     def test_centroid_near_origin(self):
-        vertices, _ = read_stl("reference/models/kh-101-cruise-missile.stl")
+        vertices, _ = read_stl("reference/models/kh101.stl")
         vertices, _ = normalize_stl(vertices, np.zeros((0, 3), dtype=int), scale=0.001)
         centroid = vertices.mean(axis=0)
         assert np.linalg.norm(centroid) < 1e-3
 
     def test_z_is_longest_axis_kh101(self):
-        vertices, _ = read_stl("reference/models/kh-101-cruise-missile.stl")
+        vertices, _ = read_stl("reference/models/kh101.stl")
         vertices, _ = normalize_stl(vertices, np.zeros((0, 3), dtype=int), scale=0.001)
         assert _primary_z_aligned(vertices)
 
     def test_no_nans_after_normalize(self):
-        vertices, faces = read_stl("reference/models/kh-101-cruise-missile.stl")
+        vertices, faces = read_stl("reference/models/kh101.stl")
         vertices, faces = normalize_stl(vertices, faces, scale=0.001)
         assert not np.any(np.isnan(vertices))
 
     def test_length_sanity_kh101(self):
-        vertices, _ = read_stl("reference/models/kh-101-cruise-missile.stl")
+        vertices, _ = read_stl("reference/models/kh101.stl")
         vertices, _ = normalize_stl(vertices, np.zeros((0, 3), dtype=int), scale=0.001)
         z_extent = float(vertices[:, 2].max() - vertices[:, 2].min())
         assert 5.0 < z_extent < 10.0
 
     def test_force_axis_overrides(self):
-        vertices, _ = read_stl("reference/models/kh-101-cruise-missile.stl")
+        vertices, _ = read_stl("reference/models/kh101.stl")
         v1, _ = normalize_stl(vertices, np.zeros((0, 3), dtype=int), scale=0.001, force_axis=0)
         assert _primary_z_aligned(v1)
 
     def test_scale_changes_extent(self):
-        vertices, _ = read_stl("reference/models/kh-101-cruise-missile.stl")
+        vertices, _ = read_stl("reference/models/kh101.stl")
         v1, _ = normalize_stl(vertices, np.zeros((0, 3), dtype=int), scale=1.0)
         v2, _ = normalize_stl(vertices, np.zeros((0, 3), dtype=int), scale=0.001)
         z1 = float(v1[:, 2].max() - v1[:, 2].min())

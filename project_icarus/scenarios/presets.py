@@ -12,6 +12,7 @@ from .target_factory import (
     SwarmScenario,
     DecoyThreatScenario,
     CruiseMissileScenario,
+    SarmatScenario,
     MU_EARTH,
     R_EARTH,
 )
@@ -325,10 +326,25 @@ def geodetic_launch_to_target(
         )
         speed_note = f"bus v0 {speed:.0f} m/s, {n_payloads} RVs, {spread_deg:.1f}° spread"
 
+    elif scenario_type == "sarmat":
+        v0, speed = launch_to_target_velocity(
+            launch_lat, launch_lon, launch_alt, az, rng, launch_el_deg
+        )
+        target = SarmatScenario(
+            r0=r0, v0=v0,
+            boost_profile=kwargs.get("boost_profile", "shortened"),
+            boost_duration_s=kwargs.get("boost_duration_s", 80.0),
+            midcourse_profile=kwargs.get("midcourse_profile", "standard"),
+            midcourse_alteration_delta_v=kwargs.get("midcourse_alteration_delta_v", 0.0),
+            pbb_warheads=kwargs.get("pbb_warheads", 10),
+            pbb_decoys=kwargs.get("pbb_decoys", 50),
+        )
+        speed_note = f"v0 {speed:.0f} m/s (Sarmat shortened boost, PBB, midcourse alterations)"
+
     else:
         raise ValueError(
             f"Unknown scenario_type '{scenario_type}'. "
-            "Expected one of: ballistic, fobs, hgv, suppressed, swarm."
+            "Expected one of: ballistic, fobs, hgv, suppressed, swarm, sarmat."
         )
 
     engagement = EngagementScenario(
@@ -895,6 +911,7 @@ def _register_from_locations():
         ("fobs", {"apoapsis_km": 200.0}, "_fobs"),
         ("hgv", {"glide_alt_km": 70.0, "speed_mach": 12.0}, "_hgv"),
         ("suppressed", {}, "_suppressed"),
+        ("sarmat", {"boost_profile": "shortened", "pbb_warheads": 10, "pbb_decoys": 50}, "_sarmat"),
     ]
     for threat_name, defended_name in _THREAT_TO_DEFENDED:
         if threat_name not in by_name or defended_name not in defended_by_name:
