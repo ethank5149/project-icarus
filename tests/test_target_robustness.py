@@ -101,7 +101,50 @@ class TestFOBSRobustness:
         _assert_reaches_surface(state)
         impact_pos = state[:3]
         dist_to_aim = float(np.linalg.norm(impact_pos - aim))
-        assert dist_to_aim < 3000e3, f"FOBS missed aim by {dist_to_aim / 1e3:.1f} km"
+        assert dist_to_aim < 2500e3, f"FOBS missed aim by {dist_to_aim / 1e3:.1f} km"
+
+
+_HGV_AIM = np.array([6.358395225412172e6, 0.0, 499758.44326704595])
+
+
+class TestHGVAimPoint:
+    def test_hgs_hits_aim(self):
+        r0 = np.array([R_EARTH + 80e3, 0.0, 0.0])
+        v0 = np.array([0.0, 0.0, 6000.0])
+        tgt = HGVScenario(r0=r0, v0=v0, max_alt_km=80.0, lateral_range_km=1500.0)
+        state = tgt.propagate(1000.0)
+        _assert_finite_state(state)
+        _assert_reaches_surface(state)
+        dist_to_aim = float(np.linalg.norm(state[:3] - _HGV_AIM))
+        assert dist_to_aim < 10e3, f"HGV missed aim by {dist_to_aim / 1e3:.1f} km"
+
+
+_Suppressed_AIM = np.array([5.784705415467419e6, 736664.0803803997, 2578324.2813313985])
+
+
+class TestSuppressedAimPoint:
+    def test_suppressed_hits_aim(self):
+        r0 = np.array([R_EARTH + 1e5, 0.0, 0.0])
+        v0 = np.array([0.0, 2000.0, 7000.0])
+        tgt = SuppressedScenario(r0=r0, v0=v0, midcourse_maneuver_mag=100.0)
+        state = tgt.propagate(700.0)
+        _assert_finite_state(state)
+        _assert_reaches_surface(state)
+        dist_to_aim = float(np.linalg.norm(state[:3] - _Suppressed_AIM))
+        assert dist_to_aim < 20e3, f"Suppressed missed aim by {dist_to_aim / 1e3:.1f} km"
+
+
+_CruiseMissile_AIM = np.array([4.530008475706846e6, 1.767262519908741e6, 0.0])
+
+
+class TestCruiseMissileAimPoint:
+    def test_cruise_missile_hits_aim(self):
+        tgt = CruiseMissileScenario.from_params(launch_alt_km=0.0, range_km=500.0)
+        state = tgt.propagate(700.0)
+        _assert_finite_state(state)
+        _assert_reaches_surface(state, tol_m=2e4)
+        dist_to_aim = float(np.linalg.norm(state[:3] - _CruiseMissile_AIM))
+        assert dist_to_aim < 5e3, f"CruiseMissile missed aim by {dist_to_aim / 1e3:.1f} km"
 
 
 class TestSuppressedRobustness:

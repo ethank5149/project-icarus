@@ -1,13 +1,48 @@
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Callable, Tuple
 import json
-import os
 import tempfile
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 from .battle_manager import BattleManager, BattleManagerConfig, BattleResult, ThreatTrack, Battery
+
+
+def sample_era5_dates(n: int, grib_paths: Optional[List[str]], rng: Optional[np.random.Generator] = None) -> List[str]:
+    """Randomly sample ``n`` ERA5 timestamps from the available GRIB files.
+
+    Parameters
+    ----------
+    n : int
+        Number of dates to sample.
+    grib_paths : list[str] or None
+        Paths to ERA5 GRIB files.  When ``None`` an empty list is returned.
+    rng : np.random.Generator, optional
+        RNG for reproducibility.
+
+    Returns
+    -------
+    list[str]
+        ISO-format datetime strings sampled from the union of all loaded months.
+    """
+    rng = rng or np.random.default_rng(12345)
+    if not grib_paths:
+        return []
+    try:
+        from project_icarus.reference.era5 import ERA5Interpolator
+        interp = ERA5Interpolator(grib_paths)
+        ds = interp._open()
+        times = ds.time.values.astype("datetime64[ns]").astype(str)
+        interp.close()
+        chosen = times[rng.integers(0, len(times), size=n)]
+        return [str(t) for t in chosen]
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -37,10 +72,8 @@ def _serialize_target(target) -> Dict[str, Any]:
                 out[key] = v.tolist()
             else:
                 out[key] = v
-    # Fallback: capture the constructor signature if it is a simple ballistic.
-    if "r0" not in out and hasattr(target, "propagate"):
-        # BallisticScenario(r0, v0) is the common case; re-derive if possible.
-        pass
+    if len(out) == 1:
+        raise ValueError(f"Cannot serialize target kind {type(target).__name__}")
     return out
 
 
@@ -185,6 +218,7 @@ class CampaignThreat:
     launch_site: np.ndarray = field(default_factory=lambda: np.zeros(3))
     priority: float = 1.0
     label: str = ""
+    era5_date: Optional[str] = None
 
 
 @dataclass
@@ -192,9 +226,13 @@ class CampaignResult:
     battle: BattleResult
     engagements: List[Any] = field(default_factory=list)
     config: Any = None
+    cep_m: Optional[float] = None
 
     def summary(self) -> Dict[str, Any]:
-        return self.battle.summary()
+        out = self.battle.summary()
+        if self.cep_m is not None:
+            out["cep_m"] = float(self.cep_m)
+        return out
 
 
 def _default_assess_factory(engagements_by_threat: Dict[int, List[Any]],
@@ -219,6 +257,39 @@ def _default_assess_factory(engagements_by_threat: Dict[int, List[Any]],
             return float("inf")
         return float(miss)
     return assess
+
+
+def _compute_cep(engagements: List[Any], threats: List[CampaignThreat]) -> Optional[float]:
+    """Compute Circular Error Probable from Monte-Carlo miss distances.
+
+    For each threat, collect all finite miss distances.  When ``n_trials > 1``
+    the campaign path stores MC misses in ``eng.monte_carlo.miss_distances``;
+    otherwise fall back to ``eng.miss_distance``.
+    """
+    all_misses: List[float] = []
+    aim_points: List[np.ndarray] = []
+    for ti, eng in enumerate(engagements):
+        if ti >= len(threats):
+            break
+        mc = getattr(eng, "monte_carlo", None)
+        misses: List[float] = []
+        if mc is not None:
+            misses = [float(m) for m in getattr(mc, "miss_distances", []) if np.isfinite(m)]
+        if not misses:
+            miss = getattr(eng, "miss_distance", None)
+            if miss is not None and np.isfinite(miss):
+                misses = [float(miss)]
+        if not misses:
+            continue
+        all_misses.extend(misses)
+        aim = np.asarray(threats[ti].aim_point, dtype=float)
+        aim_points.extend([aim] * len(misses))
+    if not all_misses:
+        return None
+    aim_pts = np.column_stack(aim_points) if all_misses else np.zeros((3, 0))
+    # Fallback when we only have scalar misses without full impact coordinates.
+    # Use the 50th percentile of radial miss distances directly.
+    return float(np.percentile(np.abs(all_misses), 50))
 
 
 def run_campaign(
@@ -344,4 +415,6 @@ def run_campaign(
     assess = _default_assess_factory(engagements_by_threat, 0.5)
     battle = bm.run(assess)
 
-    return CampaignResult(battle=battle, engagements=all_engagements, config=cfg)
+    cep = _compute_cep(all_engagements, threats)
+
+    return CampaignResult(battle=battle, engagements=all_engagements, config=cfg, cep_m=cep)

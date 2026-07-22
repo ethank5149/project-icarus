@@ -286,7 +286,7 @@ def _phase_stateless(t, y, phase_events, ctx):
 
 
 def _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom, thrust_fn,
-                     peak_thrust, phase_events, mass_floor=1e-3):
+                     peak_thrust, phase_events, mass_floor=1e-3, wind_model=None):
     r = y[:3]
     v = y[3:6]
     q = y[6:10]
@@ -312,6 +312,8 @@ def _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom, thrust_fn,
     rho = 1.225 * np.exp(-max(alt, 0.0) / 8500.0) if alt < 100e3 else 0.0
 
     eom_state = {"r": r, "v": v, "q": q, "omega": omega, "m": m}
+    if wind_model is not None:
+        eom_state["wind"] = wind_model
 
     f_thrust = np.zeros(3)
     if phase == "boost":
@@ -502,6 +504,7 @@ def _integrate_trajectory(interceptor, guidance_law, target, scenario, perturb=N
 
     phase_events = _default_events(cfg)
     mass_floor = cfg.mass_floor
+    wind_model = cfg.wind_model if cfg.use_wind else None
 
     t_span = [scenario.engagement_start, scenario.engagement_end]
     t_end = min(t_span[1], cfg.t_max)
@@ -516,6 +519,7 @@ def _integrate_trajectory(interceptor, guidance_law, target, scenario, perturb=N
         return lambda t, y: _closed_loop_rhs(
             t, y, interceptor, guidance_law, target_fn, eom,
             thrust_fn, peak_thrust, phase_events, mass_floor,
+            wind_model=wind_model,
         )
 
     if cfg.integrator == "dop853":

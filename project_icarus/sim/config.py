@@ -57,6 +57,10 @@ class SimConfig:
     })
     seed: int = 12345
 
+    # --- Wind / ERA5 ---
+    use_wind: bool = False
+    wind_model: Optional[Any] = field(default=None)
+
     # --- Logging ---
     log_level: int = logging.INFO
 

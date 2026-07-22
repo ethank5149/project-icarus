@@ -11,7 +11,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 import json
+import logging
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 def save_campaign_hdf5(
@@ -61,8 +64,8 @@ def save_campaign_hdf5(
                     "shots_fired": int(getattr(battle, fired_name)),
                     "kill_probability": float(getattr(battle, killp_name)),
                 })
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Battle metadata extraction failed: %s", exc)
         f.attrs["meta"] = json.dumps(meta_out)
 
         # --- battle shots ------------------------------------------------
@@ -99,8 +102,8 @@ def save_campaign_hdf5(
                 from .layers import architecture_summary
                 g_arch = f.create_group("architecture")
                 g_arch.attrs["summary"] = json.dumps(architecture_summary(architecture))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Architecture summary serialization failed: %s", exc)
 
     return path
 
@@ -120,8 +123,8 @@ def load_campaign_hdf5(path: str) -> Dict[str, Any]:
         if "meta" in f.attrs:
             try:
                 out["meta"] = json.loads(f.attrs["meta"])
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Meta JSON parse failed: %s", exc)
         if "battle" in f:
             g = f["battle"]
             if "threat_id" in g:
@@ -153,6 +156,6 @@ def load_campaign_hdf5(path: str) -> Dict[str, Any]:
                 out["architecture_summary"] = json.loads(
                     f["architecture"].attrs["summary"]
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Architecture summary parse failed: %s", exc)
     return out

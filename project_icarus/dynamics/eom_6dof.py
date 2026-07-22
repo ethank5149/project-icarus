@@ -1,6 +1,7 @@
 import numpy as np
 from datetime import datetime
 from typing import Optional
+import logging
 
 from .coordinate_systems import (
     quat_normalize,
@@ -13,6 +14,8 @@ from .coordinate_systems import (
 )
 from .gravity import gravity_inertial, gravity_gradient_torque
 from .atmosphere import Atmosphere
+
+logger = logging.getLogger(__name__)
 
 
 geodetic_altitude = _geodetic_altitude
@@ -154,14 +157,25 @@ class EOM6DOF:
         omega = np.asarray(state["omega"], dtype=float)
         m = float(state["m"])
 
+        wind = state.get("wind", None)
+        U_wind = np.zeros(3)
+        if wind is not None:
+            try:
+                from .coordinate_systems import ecef_to_geodetic
+                lat, lon, alt = ecef_to_geodetic(r)
+                U_wind = np.asarray(wind(float(lat), float(lon), float(alt), float(t)), dtype=float)
+            except Exception:
+                U_wind = np.zeros(3)
+        v_rel = v - U_wind
+
         if self.use_cython and self._cy_qn is not None:
             q = self._cy_qn(q)
             alt = self._cy_geo_alt(r)
-            v_mag = np.linalg.norm(v)
+            v_mag = np.linalg.norm(v_rel)
             rho = self.atmosphere.density_scalar(alt)
             q_dyn = 0.5 * rho * v_mag**2
             C = self._cy_q2dcm(q)
-            v_body = C.T @ v
+            v_body = C.T @ v_rel
             v_body_mag = np.linalg.norm(v_body)
             mach = v_mag / max(self.atmosphere.speed_of_sound_scalar(alt), 1e-6)
             alpha = np.degrees(np.arctan2(v_body[2], v_body[0]))
@@ -187,8 +201,8 @@ class EOM6DOF:
                     self.atmosphere.set_exo_solar_geomagnetic(
                         lat=lat, lon=lon, time=self.solar_time
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("NRLMSISE geodetic update failed: %s", exc)
             g_inertial = self._cy_grav(
                 r, use_j2=self.use_j2, use_high_order=self.use_high_order,
                 use_j3=self.use_j3, use_j4=self.use_j4, max_degree=self.max_degree,
@@ -215,12 +229,12 @@ class EOM6DOF:
             q = quat_normalize(q)
 
             alt = _geodetic_altitude(r)
-            v_mag = np.linalg.norm(v)
+            v_mag = np.linalg.norm(v_rel)
             rho = self.atmosphere.density_scalar(alt)
             q_dyn = 0.5 * rho * v_mag**2
 
             C = quat_to_dcm(q)
-            v_body = C.T @ v
+            v_body = C.T @ v_rel
             v_body_mag = np.linalg.norm(v_body)
             mach = v_mag / max(self.atmosphere.speed_of_sound_scalar(alt), 1e-6)
 

@@ -1,4 +1,6 @@
+import logging
 import numpy as np
+from typing import Optional, Protocol, runtime_checkable
 
 try:  # NRLMSISE-00 is an optional dependency; fall back to the analytic thermosphere.
     from nrlmsise00 import msise_model as _msise_model
@@ -8,12 +10,18 @@ except Exception:  # pragma: no cover - environment dependent
     _HAVE_NRLMSISE = False
 
 
+logger = logging.getLogger(__name__)
+
 R_AIR = 287.05
 GAMMA = 1.4
 G0 = 9.80665
 T0 = 288.15
 P0 = 101325.0
 RHO0 = 1.225
+
+R_UNIVERSAL = 8.314462618
+_M_DRY_AIR = 28.97e-3  # kg/mol
+_R_SPECIFIC = R_UNIVERSAL / _M_DRY_AIR
 
 # Species molar masses [g/mol] for converting NRLMSISE number densities [cm^-3]
 # to mass densities [kg/m^3].
@@ -231,11 +239,14 @@ class NRLMSISEExo:
         return 1.458e-6 * (T ** 1.5) / (T + 110.4)
 
 
-R_UNIVERSAL = 8.314462618
+@runtime_checkable
+class WindModel(Protocol):
+    def wind(self, lat: float, lon: float, alt: float, time: float) -> tuple[float, float, float]: ...
 
 
 class Atmosphere:
-    def __init__(self, boundary_alt=100e3, taper_width=5e3, exo_model=None):
+    def __init__(self, boundary_alt=100e3, taper_width=5e3, exo_model=None,
+                 wind_model: Optional[WindModel] = None):
         self.boundary_alt = boundary_alt
         self.taper_width = taper_width
         self.endo = EndoAtmosphere()
@@ -246,6 +257,46 @@ class Atmosphere:
         else:
             self.exo = ExoAtmosphere()
         self.uses_nrlmsise = isinstance(self.exo, NRLMSISEExo)
+        self._wind_model = wind_model
+        self.use_era5_temperature = False
+        self.use_era5_pressure = False
+        self.use_era5_density = False
+
+    def set_wind_model(self, wind_model: Optional[WindModel]):
+        self._wind_model = wind_model
+
+    def set_era5(self, grib_paths, date=None, hourly=False):
+        """Install an ERA5 wind/thermodynamic model.
+
+        Parameters
+        ----------
+        grib_paths : str or list[str]
+            Path(s) to ERA5 GRIB file(s).
+        date : str, optional
+            ISO date string (e.g. ``'2015-01-15T12:00'``).  When ``None`` the
+            midpoint of the loaded dataset is used.
+        hourly : bool
+            Ignored; kept for API completeness.  The interpolator reads whatever
+            timestamps are present in the GRIB.
+        """
+        from ..reference.era5 import ERA5Interpolator
+        era5 = ERA5Interpolator(grib_paths)
+        if date is None:
+            ds = era5._open()
+            t0 = np.datetime64(ds.time[0].values, "ns")
+            t1 = np.datetime64(ds.time[-1].values, "ns")
+            date = str(t0 + (t1 - t0) / 2.0)
+        self._wind_model = era5
+        self._era5_date = date
+        self.use_era5_temperature = True
+        self.use_era5_pressure = True
+        self.use_era5_density = True
+        return era5
+
+    def wind(self, lat, lon, alt, time):
+        if self._wind_model is not None:
+            return self._wind_model.wind(lat, lon, alt, time)
+        return 0.0, 0.0, 0.0
 
     def set_exo_solar_geomagnetic(self, f107a=None, f107=None, ap=None,
                                   time=None, lat=None, lon=None):
@@ -267,38 +318,85 @@ class Atmosphere:
 
     def density(self, h):
         h = np.asarray(h, dtype=float)
+        if self.use_era5_density and self._wind_model is not None:
+            try:
+                from ..reference.era5 import ERA5Interpolator
+                if isinstance(self._wind_model, ERA5Interpolator):
+                    ds = self._wind_model._open()
+                    t_val = self._wind_model._safe_time(0.0)
+                    era5_rho = self._wind_model.density(0.0, 0.0, float(np.mean(h)), t_val)
+                    if np.isfinite(era5_rho) and era5_rho > 0:
+                        return np.where(
+                            (h >= 0.0) & (h <= 48e3),
+                            era5_rho,
+                            self._regime_value(h, "density"),
+                        )
+            except Exception:
+                pass
         return self._regime_value(h, "density")
 
     def density_scalar(self, h):
-        return self._regime_value_scalar(h, "density")
+        return float(self.density(np.array([h]))[0])
 
     def temperature(self, h):
         h = np.asarray(h, dtype=float)
+        if self.use_era5_temperature and self._wind_model is not None:
+            try:
+                from ..reference.era5 import ERA5Interpolator
+                if isinstance(self._wind_model, ERA5Interpolator):
+                    ds = self._wind_model._open()
+                    t_val = self._wind_model._safe_time(0.0)
+                    era5_T = self._wind_model.temperature(0.0, 0.0, float(np.mean(h)), t_val)
+                    if np.isfinite(era5_T) and era5_T > 0:
+                        return np.where(
+                            (h >= 0.0) & (h <= 48e3),
+                            era5_T,
+                            self._regime_value(h, "temperature"),
+                        )
+            except Exception:
+                pass
         return self._regime_value(h, "temperature")
 
     def temperature_scalar(self, h):
-        return self._regime_value_scalar(h, "temperature")
+        return float(self.temperature(np.array([h]))[0])
 
     def pressure(self, h):
         h = np.asarray(h, dtype=float)
+        if self.use_era5_pressure and self._wind_model is not None:
+            try:
+                from ..reference.era5 import ERA5Interpolator
+                if isinstance(self._wind_model, ERA5Interpolator):
+                    ds = self._wind_model._open()
+                    t_val = self._wind_model._safe_time(0.0)
+                    era5_p = self._wind_model.pressure(0.0, 0.0, float(np.mean(h)), t_val)
+                    if np.isfinite(era5_p) and era5_p > 0:
+                        return np.where(
+                            (h >= 0.0) & (h <= 48e3),
+                            era5_p,
+                            self._regime_value(h, "pressure"),
+                        )
+            except Exception:
+                pass
         return self._regime_value(h, "pressure")
 
     def pressure_scalar(self, h):
-        return self._regime_value_scalar(h, "pressure")
+        return float(self.pressure(np.array([h]))[0])
 
     def speed_of_sound(self, h):
         h = np.asarray(h, dtype=float)
-        return self._regime_value(h, "speed_of_sound")
+        T = self.temperature(h)
+        return np.sqrt(GAMMA * R_AIR * np.maximum(T, 150.0))
 
     def speed_of_sound_scalar(self, h):
-        return self._regime_value_scalar(h, "speed_of_sound")
+        return float(self.speed_of_sound(np.array([h]))[0])
 
     def dynamic_viscosity(self, h):
         h = np.asarray(h, dtype=float)
-        return self._regime_value(h, "dynamic_viscosity")
+        T = self.temperature(h)
+        return 1.458e-6 * (T ** 1.5) / (T + 110.4)
 
     def dynamic_viscosity_scalar(self, h):
-        return self._regime_value_scalar(h, "dynamic_viscosity")
+        return float(self.dynamic_viscosity(np.array([h]))[0])
 
     def _regime_value(self, h, attr):
         h = np.asarray(h, dtype=float)

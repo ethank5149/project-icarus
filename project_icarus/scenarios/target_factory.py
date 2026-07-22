@@ -347,8 +347,13 @@ def simulate_guided_threat(
     else:
         sol_t = np.linspace(t0, t_end_eff, max(int((t_end_eff - t0) / 2.0) + 1, 2))
 
-    grid = sol.sol(sol_t)
-    six_vec = np.vstack([grid[:3, :], grid[3:6, :]])
+    try:
+        grid = sol.sol(sol_t)
+        six_vec = np.vstack([grid[:3, :], grid[3:6, :]])
+    except Exception:
+        idx = np.searchsorted(sol.t, sol_t)
+        idx = np.clip(idx, 0, len(sol.t) - 1)
+        six_vec = np.vstack([sol.y[:3, idx], sol.y[3:6, idx]])
     return sol_t, six_vec
 
 
@@ -379,13 +384,44 @@ class BallisticScenario:
     area: float = 0.02
     mass: float = 1000.0
     atmosphere: Optional[Atmosphere] = None
+    wind_model: Optional[Any] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    _wind_cache_key: Any = field(default=None, repr=False, compare=False)
+    _wind_cache_val: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         if self.atmosphere is None:
             self.atmosphere = Atmosphere()
 
-    def _accel(self, r, v):
+    def _wind_accel(self, r, v, t, dt):
+        if self.wind_model is None:
+            return np.zeros(3)
+        try:
+            lat, lon, alt = _ecef_to_geodetic(r)
+        except Exception:
+            return np.zeros(3)
+        if alt > 150e3 or alt < 0.0:
+            return np.zeros(3)
+        key = (round(float(lat), 4), round(float(lon), 4), round(float(alt), 1), round(float(t), 2))
+        if getattr(self, '_wind_cache_key', None) != key:
+            U0 = np.asarray(self.wind_model.wind(float(lat), float(lon), float(alt), float(t)), dtype=float)
+            dU_dt = np.zeros(3)
+            if dt > 1e-6:
+                U1 = np.asarray(self.wind_model.wind(float(lat), float(lon), float(alt), float(t) + dt), dtype=float)
+                dU_dt = (U1 - U0) / dt
+            eps = 1e-4
+            U_lat = np.asarray(self.wind_model.wind(float(lat) + eps, float(lon), float(alt), float(t)), dtype=float)
+            U_lon = np.asarray(self.wind_model.wind(float(lat), float(lon) + eps, float(alt), float(t)), dtype=float)
+            deg2m_lat = 111_132.92
+            deg2m_lon = 111_132.92 * np.cos(np.radians(float(lat)))
+            a_wind = np.zeros(3)
+            for i in range(3):
+                a_wind[i] = dU_dt[i] + v[0] * (U_lon[i] - U0[i]) / (deg2m_lon * eps) + v[1] * (U_lat[i] - U0[i]) / (deg2m_lat * eps)
+            self._wind_cache_key = key
+            self._wind_cache_val = a_wind.tolist()
+        return np.array(self._wind_cache_val)
+
+    def _accel(self, r, v, t=None, dt=0.5):
         r = np.asarray(r, dtype=float)
         v = np.asarray(v, dtype=float)
         vmag = np.linalg.norm(v)
@@ -399,7 +435,10 @@ class BallisticScenario:
             rho = self.atmosphere.density_scalar(alt)
             q_dyn = 0.5 * rho * vmag**2
             a_drag = -q_dyn * self.cd * self.area / self.mass * (v / vmag)
-        return a_grav + a_drag
+        a = a_grav + a_drag
+        if t is not None:
+            a = a + self._wind_accel(r, v, t, dt)
+        return a
 
     def propagate(self, t: float) -> np.ndarray:
         r = self.r0.astype(float).copy()
@@ -408,7 +447,7 @@ class BallisticScenario:
 
         def rhs(ti, y):
             r, v = y[:3], y[3:]
-            a = self._accel(r, v)
+            a = self._accel(r, v, t=ti, dt=0.5)
             return np.concatenate([v, a])
 
         def ground_event(ti, y):
@@ -523,13 +562,13 @@ class FOBSScenario:
     use_third_body: bool = False
     use_tides: bool = False
     max_degree: int = 10
+    wind_model: Optional[Any] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     _cache: Any = field(default=None, repr=False)
+    _wind_cache_key: Any = field(default=None, repr=False, compare=False)
+    _wind_cache_val: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
-        # Aim point: ground location the boost azimuth points to (used by the
-        # reentry phase so a geodetically-aimed FOBS converges on its target
-        # instead of a hardcoded (R_EARTH + 100km, 0, 0) point).
         rmag = np.linalg.norm(self.r0)
         if rmag > 1e-6 and np.linalg.norm(self.v0) > 1e-6:
             lat0, lon0, _ = _ecef_to_geodetic(self.r0)
@@ -541,13 +580,40 @@ class FOBSScenario:
                 np.cos(np.radians(lat0)),
             ])
             az = np.degrees(np.arctan2(np.dot(v_unit, east), np.dot(v_unit, north))) % 360.0
-            # Downrange at apogee (~half the orbital coast arc) along great circle.
             coast_arc_deg = (self._coast_duration * np.linalg.norm(self.v0) / rmag) / np.pi * 180.0
             aim_lat, aim_lon = _destination_point(lat0, lon0, az, coast_arc_deg * 0.5)
             self._aim_point = _geodetic_to_ecef_simple(aim_lat, aim_lon, 0.0)
         else:
             self._aim_point = np.array([R_EARTH + self._reentry_alt, 0.0, 0.0])
         self._cache = None
+
+    def _wind_accel(self, r, v, t, dt):
+        if self.wind_model is None:
+            return np.zeros(3)
+        try:
+            lat, lon, alt = _ecef_to_geodetic(r)
+        except Exception:
+            return np.zeros(3)
+        if alt > 150e3 or alt < 0.0:
+            return np.zeros(3)
+        key = (round(float(lat), 4), round(float(lon), 4), round(float(alt), 1), round(float(t), 2))
+        if getattr(self, '_wind_cache_key', None) != key:
+            U0 = np.asarray(self.wind_model.wind(float(lat), float(lon), float(alt), float(t)), dtype=float)
+            dU_dt = np.zeros(3)
+            if dt > 1e-6:
+                U1 = np.asarray(self.wind_model.wind(float(lat), float(lon), float(alt), float(t) + dt), dtype=float)
+                dU_dt = (U1 - U0) / dt
+            eps = 1e-4
+            U_lat = np.asarray(self.wind_model.wind(float(lat) + eps, float(lon), float(alt), float(t)), dtype=float)
+            U_lon = np.asarray(self.wind_model.wind(float(lat), float(lon) + eps, float(alt), float(t)), dtype=float)
+            deg2m_lat = 111_132.92
+            deg2m_lon = 111_132.92 * np.cos(np.radians(float(lat)))
+            a_wind = np.zeros(3)
+            for i in range(3):
+                a_wind[i] = dU_dt[i] + v[0] * (U_lat[i] - U0[i]) / (deg2m_lat * eps) + v[1] * (U_lon[i] - U0[i]) / (deg2m_lon * eps)
+            self._wind_cache_key = key
+            self._wind_cache_val = a_wind.tolist()
+        return np.array(self._wind_cache_val)
 
     def _orbital_speed(self, r):
         return np.sqrt(MU_EARTH / max(r, 1e-6))
@@ -565,12 +631,14 @@ class FOBSScenario:
             boost_states = []
             r = self.r0.astype(float).copy()
             v = self.v0.astype(float).copy()
-            for _ in boost_t:
+            for ti_idx, ti in enumerate(boost_t):
                 boost_states.append(np.concatenate([r.copy(), v.copy()]))
                 a = _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
                                     use_j4=self.use_j4, use_high_order=self.use_high_order,
                                     use_third_body=self.use_third_body, use_tides=self.use_tides,
                                     max_degree=self.max_degree) + np.array([self.thrust, 0.0, 0.0])
+                if self.wind_model is not None and _ground_altitude(r) < 150e3:
+                    a = a + self._wind_accel(r, v, ti, dt_boost)
                 v = v + a * dt_boost
                 r = r + v * dt_boost
             boost_states.append(np.concatenate([r.copy(), v.copy()]))
@@ -600,6 +668,8 @@ class FOBSScenario:
                                 use_j4=self.use_j4, use_high_order=self.use_high_order,
                                 use_third_body=self.use_third_body, use_tides=self.use_tides,
                                 max_degree=self.max_degree)
+            if self.wind_model is not None and _ground_altitude(r) < 150e3:
+                a = a + self._wind_accel(r, v, ti, dt_coast)
             return np.concatenate([v, a])
 
         dt_coast = 0.05
@@ -716,19 +786,53 @@ class HGVScenario:
     max_degree: int = 10
     adaptive: bool = False
     atmosphere: Optional[Atmosphere] = None
+    wind_model: Optional[Any] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    _wind_cache_key: Any = field(default=None, repr=False, compare=False)
+    _wind_cache_val: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         if self.atmosphere is None:
             self.atmosphere = Atmosphere()
 
-    def _accel(self, r, v):
+    def _wind_accel(self, r, v, t, dt):
+        if self.wind_model is None:
+            return np.zeros(3)
+        try:
+            lat, lon, alt = _ecef_to_geodetic(r)
+        except Exception:
+            return np.zeros(3)
+        if alt > 150e3 or alt < 0.0:
+            return np.zeros(3)
+        key = (round(float(lat), 4), round(float(lon), 4), round(float(alt), 1), round(float(t), 2))
+        if getattr(self, '_wind_cache_key', None) != key:
+            U0 = np.asarray(self.wind_model.wind(float(lat), float(lon), float(alt), float(t)), dtype=float)
+            dU_dt = np.zeros(3)
+            if dt > 1e-6:
+                U1 = np.asarray(self.wind_model.wind(float(lat), float(lon), float(alt), float(t) + dt), dtype=float)
+                dU_dt = (U1 - U0) / dt
+            eps = 1e-4
+            U_lat = np.asarray(self.wind_model.wind(float(lat) + eps, float(lon), float(alt), float(t)), dtype=float)
+            U_lon = np.asarray(self.wind_model.wind(float(lat), float(lon) + eps, float(alt), float(t)), dtype=float)
+            deg2m_lat = 111_132.92
+            deg2m_lon = 111_132.92 * np.cos(np.radians(float(lat)))
+            a_wind = np.zeros(3)
+            for i in range(3):
+                a_wind[i] = dU_dt[i] + v[0] * (U_lat[i] - U0[i]) / (deg2m_lat * eps) + v[1] * (U_lon[i] - U0[i]) / (deg2m_lon * eps)
+            self._wind_cache_key = key
+            self._wind_cache_val = a_wind.tolist()
+        return np.array(self._wind_cache_val)
+
+    def _accel(self, r, v, t=None, dt=0.5):
         vmag = np.linalg.norm(v)
         if vmag < 1e-6:
-            return _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
-                                   use_j4=self.use_j4, use_high_order=self.use_high_order,
-                                   use_third_body=self.use_third_body, use_tides=self.use_tides,
-                                   max_degree=self.max_degree)
+            a_grav = _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
+                                     use_j4=self.use_j4, use_high_order=self.use_high_order,
+                                     use_third_body=self.use_third_body, use_tides=self.use_tides,
+                                     max_degree=self.max_degree)
+            if t is not None:
+                a_grav = a_grav + self._wind_accel(r, v, t, dt)
+            return a_grav
         g_unit = -r / np.linalg.norm(r)
         v_unit = v / vmag
         lift_dir = g_unit - np.dot(g_unit, v_unit) * v_unit
@@ -751,7 +855,10 @@ class HGVScenario:
             gamma = np.arcsin(np.clip(v_unit[2], -1.0, 1.0))
             if np.degrees(gamma) > self.skip_threshold_deg:
                 a_lift = q_dyn * self.cl / self.ballistic_coeff * lift_dir
-        return a_grav + a_drag + a_lift
+        a = a_grav + a_drag + a_lift
+        if t is not None:
+            a = a + self._wind_accel(r, v, t, dt)
+        return a
 
     def propagate(self, t: float) -> np.ndarray:
         r = self.r0.astype(float).copy()
@@ -760,7 +867,7 @@ class HGVScenario:
 
         def rhs(ti, y):
             r, v = y[:3], y[3:]
-            a = self._accel(r, v)
+            a = self._accel(r, v, t=ti, dt=0.5)
             return np.concatenate([v, a])
 
         def ground_event(ti, y):
@@ -858,9 +965,15 @@ class SuppressedScenario:
     use_tides: bool = False
     max_degree: int = 10
     adaptive: bool = False
+    atmosphere: Optional[Atmosphere] = None
+    wind_model: Optional[Any] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    _wind_cache_key: Any = field(default=None, repr=False, compare=False)
+    _wind_cache_val: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
+        if self.atmosphere is None:
+            self.atmosphere = Atmosphere()
         vmag = np.linalg.norm(self.v0)
         if vmag > 1e-6:
             horiz = self.v0.copy()
@@ -870,11 +983,42 @@ class SuppressedScenario:
         else:
             self._maneuver_dir = np.array([1.0, 0.0, 0.0])
 
-    def _accel(self, r, v):
-        return _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
-                               use_j4=self.use_j4, use_high_order=self.use_high_order,
-                               use_third_body=self.use_third_body, use_tides=self.use_tides,
-                               max_degree=self.max_degree)
+    def _wind_accel(self, r, v, t, dt):
+        if self.wind_model is None:
+            return np.zeros(3)
+        try:
+            lat, lon, alt = _ecef_to_geodetic(r)
+        except Exception:
+            return np.zeros(3)
+        if alt > 150e3 or alt < 0.0:
+            return np.zeros(3)
+        key = (round(float(lat), 4), round(float(lon), 4), round(float(alt), 1), round(float(t), 2))
+        if getattr(self, '_wind_cache_key', None) != key:
+            U0 = np.asarray(self.wind_model.wind(float(lat), float(lon), float(alt), float(t)), dtype=float)
+            dU_dt = np.zeros(3)
+            if dt > 1e-6:
+                U1 = np.asarray(self.wind_model.wind(float(lat), float(lon), float(alt), float(t) + dt), dtype=float)
+                dU_dt = (U1 - U0) / dt
+            eps = 1e-4
+            U_lat = np.asarray(self.wind_model.wind(float(lat) + eps, float(lon), float(alt), float(t)), dtype=float)
+            U_lon = np.asarray(self.wind_model.wind(float(lat), float(lon) + eps, float(alt), float(t)), dtype=float)
+            deg2m_lat = 111_132.92
+            deg2m_lon = 111_132.92 * np.cos(np.radians(float(lat)))
+            a_wind = np.zeros(3)
+            for i in range(3):
+                a_wind[i] = dU_dt[i] + v[0] * (U_lon[i] - U0[i]) / (deg2m_lon * eps) + v[1] * (U_lat[i] - U0[i]) / (deg2m_lat * eps)
+            self._wind_cache_key = key
+            self._wind_cache_val = a_wind.tolist()
+        return np.array(self._wind_cache_val)
+
+    def _accel(self, r, v, t=None, dt=0.5):
+        a = _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
+                            use_j4=self.use_j4, use_high_order=self.use_high_order,
+                            use_third_body=self.use_third_body, use_tides=self.use_tides,
+                            max_degree=self.max_degree)
+        if t is not None:
+            a = a + self._wind_accel(r, v, t, dt)
+        return a
 
     def propagate(self, t: float) -> np.ndarray:
         r = self.r0.astype(float).copy()
@@ -888,7 +1032,7 @@ class SuppressedScenario:
 
         def _rhs(ti, y):
             r, v = y[:3], y[3:]
-            a = self._accel(r, v)
+            a = self._accel(r, v, t=ti, dt=0.5)
             return np.concatenate([v, a])
 
         maneuver_times = []
@@ -991,6 +1135,7 @@ class SwarmScenario:
     bus_v0: np.ndarray = field(default_factory=lambda: np.zeros(3))
     n_payloads: int = 3
     spread_deg: float = 2.0
+    wind_model: Optional[Any] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     _payloads: List = field(default_factory=list, repr=False)
 
@@ -1009,9 +1154,9 @@ class SwarmScenario:
                     np.cos(i * spread),
                     0.1 * np.sin(i * spread),
                 ]) * 10.0
-                self._payloads.append(
-                    BallisticScenario(r0=self.bus_r0 + dr, v0=self.bus_v0 + dv)
-                )
+                payload = BallisticScenario(r0=self.bus_r0 + dr, v0=self.bus_v0 + dv)
+                payload.wind_model = self.wind_model
+                self._payloads.append(payload)
 
     def propagate(self, t: float) -> np.ndarray:
         return self._payloads[0].propagate(t)
@@ -1087,6 +1232,7 @@ class DecoyThreatScenario:
     rv: Any = field(default_factory=lambda: BallisticScenario())
     decoys: List[Any] = field(default_factory=list)
     release_t: float = 200.0
+    wind_model: Optional[Any] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -1098,6 +1244,8 @@ class DecoyThreatScenario:
             elif isinstance(d, dict):
                 built.append(DecoyModel(**d))
         self.decoys = built
+        if self.wind_model is not None and hasattr(self.rv, 'wind_model'):
+            self.rv.wind_model = self.wind_model
 
     def propagate(self, t: float) -> np.ndarray:
         return self.rv.propagate(t)
@@ -1157,8 +1305,39 @@ class CruiseMissileScenario:
     use_third_body: bool = False
     use_tides: bool = False
     max_degree: int = 10
+    wind_model: Optional[Any] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     _cache: Any = field(default=None, repr=False)
+    _wind_cache_key: Any = field(default=None, repr=False, compare=False)
+    _wind_cache_val: Any = field(default=None, repr=False, compare=False)
+
+    def _wind_accel(self, r, v, t, dt):
+        if self.wind_model is None:
+            return np.zeros(3)
+        try:
+            lat, lon, alt = _ecef_to_geodetic(r)
+        except Exception:
+            return np.zeros(3)
+        if alt > 150e3 or alt < 0.0:
+            return np.zeros(3)
+        key = (round(float(lat), 4), round(float(lon), 4), round(float(alt), 1), round(float(t), 2))
+        if getattr(self, '_wind_cache_key', None) != key:
+            U0 = np.asarray(self.wind_model.wind(float(lat), float(lon), float(alt), float(t)), dtype=float)
+            dU_dt = np.zeros(3)
+            if dt > 1e-6:
+                U1 = np.asarray(self.wind_model.wind(float(lat), float(lon), float(alt), float(t) + dt), dtype=float)
+                dU_dt = (U1 - U0) / dt
+            eps = 1e-4
+            U_lat = np.asarray(self.wind_model.wind(float(lat) + eps, float(lon), float(alt), float(t)), dtype=float)
+            U_lon = np.asarray(self.wind_model.wind(float(lat), float(lon) + eps, float(alt), float(t)), dtype=float)
+            deg2m_lat = 111_132.92
+            deg2m_lon = 111_132.92 * np.cos(np.radians(float(lat)))
+            a_wind = np.zeros(3)
+            for i in range(3):
+                a_wind[i] = dU_dt[i] + v[0] * (U_lat[i] - U0[i]) / (deg2m_lat * eps) + v[1] * (U_lon[i] - U0[i]) / (deg2m_lon * eps)
+            self._wind_cache_key = key
+            self._wind_cache_val = a_wind.tolist()
+        return np.array(self._wind_cache_val)
 
     def _compute_trajectory(self):
         if self._cache is not None:
@@ -1173,7 +1352,7 @@ class CruiseMissileScenario:
         cruise_speed = self.cruise_speed_mach * 340.0
         atmo = Atmosphere()
 
-        def boost_accel(r, v):
+        def boost_accel(r, v, ti):
             a_thrust = self.boost_thrust / max(m, 1e-6) * v_unit
             a_grav = _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
                                      use_j4=self.use_j4, use_high_order=self.use_high_order,
@@ -1183,14 +1362,17 @@ class CruiseMissileScenario:
             rho = atmo.density_scalar(max(alt, 0.0))
             q_dyn = 0.5 * rho * vmag**2
             a_drag = -q_dyn * 0.3 / max(m, 1e-6) * v_unit
-            return a_grav + a_thrust + a_drag
+            a = a_grav + a_thrust + a_drag
+            if self.wind_model is not None:
+                a = a + self._wind_accel(r, v, ti, dt)
+            return a
 
         # --- Boost phase: rocket motor ---
         t_boost = np.arange(0.0, self.boost_duration + dt, dt)
         boost_states = []
-        for _ in t_boost:
+        for ti in t_boost:
             boost_states.append(np.concatenate([r.copy(), v.copy()]))
-            r, v = _rk4_step(r, v, dt, boost_accel)
+            r, v = _rk4_step(r, v, dt, lambda ri, vi: boost_accel(ri, vi, ti))
             mdot = self.boost_thrust / (self.isp * 9.81)
             m = max(m - mdot * dt, self.mass_final)
             vmag = np.linalg.norm(v)
@@ -1206,9 +1388,16 @@ class CruiseMissileScenario:
         # --- Cruise phase: great-circle at constant altitude ---
         cruise_t = np.arange(0.0, 600.0, dt)
         cruise_states = []
-        for _ in cruise_t:
+        for ti in cruise_t:
             cruise_states.append(np.concatenate([r_cruise.copy(), cruise_v.copy()]))
-            r_cruise = r_cruise + cruise_v * dt
+            a_grav = _two_body_accel(r_cruise, use_j2=self.use_j2, use_j3=self.use_j3,
+                                     use_j4=self.use_j4, use_high_order=self.use_high_order,
+                                     use_third_body=self.use_third_body, use_tides=self.use_tides,
+                                     max_degree=self.max_degree)
+            a = a_grav
+            if self.wind_model is not None:
+                a = a + self._wind_accel(r_cruise, cruise_v, ti, dt)
+            r_cruise = r_cruise + cruise_v * dt + 0.5 * a * dt * dt
             r_cruise = r_cruise / np.linalg.norm(r_cruise) * (R_EARTH + self.cruise_alt_m)
             radial = r_cruise / np.linalg.norm(r_cruise)
             cruise_v = cruise_v - np.dot(cruise_v, radial) * radial
@@ -1221,7 +1410,7 @@ class CruiseMissileScenario:
         dive_t = np.arange(0.0, 60.0, dt)
         dive_states = []
 
-        def dive_accel(r, v):
+        def dive_accel(r, v, ti):
             radial = r / max(np.linalg.norm(r), 1e-9)
             horiz = v - np.dot(v, radial) * radial
             hnorm = np.linalg.norm(horiz)
@@ -1240,11 +1429,14 @@ class CruiseMissileScenario:
                                      use_j4=self.use_j4, use_high_order=self.use_high_order,
                                      use_third_body=self.use_third_body, use_tides=self.use_tides,
                                      max_degree=self.max_degree)
-            return a_grav + dive_v * 3.0
+            a = a_grav + dive_v * 3.0
+            if self.wind_model is not None:
+                a = a + self._wind_accel(r, v, ti, dt)
+            return a
 
-        for _ in dive_t:
+        for ti in dive_t:
             dive_states.append(np.concatenate([r_cruise.copy(), cruise_v.copy()]))
-            r_cruise, cruise_v = _rk4_step(r_cruise, cruise_v, dt, dive_accel)
+            r_cruise, cruise_v = _rk4_step(r_cruise, cruise_v, dt, lambda ri, vi: dive_accel(ri, vi, ti))
 
         all_t = np.concatenate([
             t_boost,
