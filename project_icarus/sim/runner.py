@@ -316,31 +316,33 @@ def _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom, thrust_fn,
         eom_state["wind"] = wind_model
 
     f_thrust = np.zeros(3)
+    autopilot = getattr(guidance_law, "autopilot", None)
+    tracker = getattr(guidance_law, "tracker", None)
     if phase == "boost":
         cmd = guidance_law.boost.commanded_gimbal(t, eom_state, rho, v)
         thrust_val = thrust_fn(t, eom_state) if thrust_fn is not None else 0.0
-        # Base thrust along -x body (project convention).
         f_thrust = np.array([-thrust_val, 0.0, 0.0])
     else:
-        # Midcourse / terminal guidance command an acceleration; realize it only
-        # up to the thrust actually available. An unpowered (coasting) interceptor
-        # cannot accelerate, so the command is inert (no fictitious force). This
-        # also prevents the integrator from stiffening on large PN commands.
+        # Midcourse / terminal guidance commands an acceleration; the full-fidelity
+        # autopilot (if present) converts the command into a realized acceleration
+        # with second-order actuator dynamics and body-rate feedback.
         avail_thrust = float(thrust_fn(t, eom_state)) if thrust_fn is not None else 0.0
         max_accel_force = avail_thrust if avail_thrust > 0.0 else 0.0
         if phase == "midcourse":
             guidance_law.midcourse.update_target(target_state, t)
             accel_cmd = guidance_law.midcourse.commanded_accel(t, eom_state)
+            # Feed the data-link 3D position measurement into the target tracker.
+            if tracker is not None:
+                try:
+                    meas = guidance_law.midcourse.measurement_noise()
+                    if meas is not None:
+                        tracker.update(t, meas[:3])
+                except Exception:
+                    pass
         else:
-            # Terminal guidance. If a seeker is attached (2B.1/2B.2) the UKF
-            # tracks the target and supplies a smoothed LOS rate to the
-            # selected terminal backend; otherwise use the analytic PN law.
             seeker = getattr(guidance_law, "seeker", None)
             if seeker is not None:
                 los_rate = seeker.update_tracker(eom_state, {"r": target_r, "v": target_v})
-                # 2C: when the target carries decoys, score them with the RV/decoy
-                # discriminator; the interceptor prefers the contact classified as
-                # the RV (the guidance law continues homing the true RV state).
                 _disc = getattr(guidance_law, "discriminate_target", None)
                 _tgt_scenario = getattr(guidance_law, "_target_scenario", None)
                 if _disc is not None and _tgt_scenario is not None:
@@ -355,6 +357,18 @@ def _closed_loop_rhs(t, y, interceptor, guidance_law, target_fn, eom, thrust_fn,
                 )
             else:
                 accel_cmd = guidance_law.terminal.commanded_accel(t, eom_state, target_state)
+
+        # Apply full-fidelity autopilot inner-loop dynamics with body-rate feedback.
+        if autopilot is not None:
+            dt_auto = max(t - getattr(autopilot, "_last_t", t), 1e-6)
+            autopilot._last_t = t
+            accel_cmd = autopilot.update(
+                accel_cmd,
+                dt=dt_auto,
+                quat=q,
+                omega_body=omega,
+            )
+
         # Convert the acceleration command to a force, capped by available thrust.
         desired_force = accel_cmd * m
         f_mag = np.linalg.norm(desired_force)

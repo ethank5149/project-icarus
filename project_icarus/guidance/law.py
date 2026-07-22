@@ -8,6 +8,8 @@ from ..guidance.boost_guidance import BoostGuidance
 from ..guidance.midcourse_guidance import MidcourseGuidance
 from ..guidance.terminal_guidance import TerminalGuidance
 from ..guidance.seeker import SeekerModel, SeekerConfig, DiscriminationModel
+from ..guidance.tracker import TargetTracker, TrackerConfig
+from ..guidance.autopilot import Autopilot, AutopilotConfig
 from ..scenarios.target_factory import ThreatSignatureLibrary
 
 
@@ -20,6 +22,31 @@ class GuidanceLaw:
         if self.config is None:
             self.config = GuidanceConfig()
 
+        try:
+            from ..dynamics.gravity import gravity_inertial
+        except Exception:
+            gravity_inertial = None
+
+        tracker_cfg = TrackerConfig(
+            dt=getattr(self.config, "tracker_dt", 1.0),
+            q_pos=getattr(self.config, "tracker_q_pos", 100.0),
+            q_vel=getattr(self.config, "tracker_q_vel", 10.0),
+            q_accel=getattr(self.config, "tracker_q_accel", 1.0),
+            sigma_meas=getattr(self.config, "tracker_sigma_meas", 10.0),
+        )
+        self.tracker = TargetTracker(tracker_cfg)
+
+        auto_cfg = AutopilotConfig(
+            omega_n=getattr(self.config, "autopilot_omega_n", 100.0),
+            damping=getattr(self.config, "autopilot_damping", 0.7),
+            accel_rate_limit=getattr(self.config, "autopilot_rate_limit", 2000.0),
+            accel_limit=self.config.terminal_accel_limit,
+            gimbal_limit_deg=getattr(self.config, "autopilot_gimbal_limit_deg", 30.0),
+            gimbal_rate_limit_deg_s=getattr(self.config, "autopilot_gimbal_rate_limit_deg_s", 200.0),
+            use_gimbal_limit=getattr(self.config, "autopilot_use_gimbal_limit", True),
+        )
+        self.autopilot = Autopilot(auto_cfg)
+
         self.boost = BoostGuidance(
             pitch_over_q=self.config.boost_pitch_over_q,
             pitch_over_angle=self.config.boost_pitch_over_angle,
@@ -29,6 +56,7 @@ class GuidanceLaw:
             N=self.config.midcourse_n,
             accel_limit=self.config.midcourse_accel_limit,
             use_cython=True,
+            tracker=self.tracker,
         )
         self.terminal = TerminalGuidance(
             N=self.config.terminal_n,
@@ -42,6 +70,8 @@ class GuidanceLaw:
             sdre_q_vel=self.config.sdre_q_vel,
             sdre_r_accel=self.config.sdre_r_accel,
             use_cython=True,
+            tracker=self.tracker,
+            gravity_model=gravity_inertial,
         )
         if self.config.ukf_enabled:
             seeker_cfg = SeekerConfig(

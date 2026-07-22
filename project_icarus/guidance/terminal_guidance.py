@@ -1,4 +1,11 @@
+from __future__ import annotations
+
 import numpy as np
+
+try:
+    from ..dynamics.gravity import gravity_inertial
+except Exception:
+    gravity_inertial = None
 
 
 class TerminalGuidance:
@@ -11,6 +18,13 @@ class TerminalGuidance:
       * "sdre_mpc"  SDRE-based MPC-lite (finite-horizon LQR on the linearized
                     relative kinematic EOM)
 
+    For full-fidelity closed-loop engagement, provide a ``tracker``.  The
+    tracker estimates target acceleration (used by APN in place of the constant
+    gravity fallback) and filtered kinematics.  When ``gravity_model`` is given
+    (a callable returning the inertial gravitational acceleration at an ECEF
+    position), APN uses the actual Earth gravity at the interceptor instead of
+    the constant ``gravity`` fallback.
+
     The ``commanded_accel`` entry point picks the backend; ``commanded_accel_seeker``
     uses the same backend but substitutes the UKF-smoothed LOS rate.
     """
@@ -21,7 +35,7 @@ class TerminalGuidance:
                  noise_std=0.01, fov=np.radians(60.0), sigma0=0.01, law="pn",
                  gravity=np.array([0.0, 0.0, -9.81]), zem_horizon=5.0,
                  sdre_q_pos=1.0, sdre_q_vel=0.1, sdre_r_accel=1.0,
-                 use_cython=True):
+                 use_cython=True, tracker=None, gravity_model=None):
         if law not in self.VALID_LAWS:
             raise ValueError(f"Unknown terminal guidance law: {law!r} (valid: {self.VALID_LAWS})")
         self.law = law
@@ -33,6 +47,7 @@ class TerminalGuidance:
         self.fov = fov
         self.sigma0 = sigma0
         self.gravity = np.asarray(gravity, dtype=float)
+        self.gravity_model = gravity_model
         self.zem_horizon = zem_horizon
         self.sdre_q_pos = sdre_q_pos
         self.sdre_q_vel = sdre_q_vel
@@ -40,6 +55,7 @@ class TerminalGuidance:
         self.seeker_range = 50e3 if mechanism == "hit_to_kill" else 20e3
         self._last_los = None
         self.use_cython = use_cython
+        self.tracker = tracker
         self._cy_los = None
         self._cy_in_fov = None
         self._cy_pn_cmd = None
@@ -186,11 +202,19 @@ class TerminalGuidance:
         if not disable_fov and not self._in_fov(los_unit):
             return np.zeros(3)
 
-        # Target acceleration estimate (APN gravity compensation / bias).
-        if self.law == "apn" and target_accel is None:
-            target_accel = self.gravity
-        else:
-            target_accel = target_accel
+        if self.law == "apn":
+            if target_accel is None:
+                if self.tracker is not None and self.tracker._initialized:
+                    target_accel = self.tracker.acceleration()
+                else:
+                    target_accel = self.gravity
+                    if self.gravity_model is not None:
+                        try:
+                            target_accel = np.asarray(
+                                self.gravity_model(np.asarray(r, dtype=float), t=t), dtype=float
+                            )
+                        except Exception:
+                            pass
 
         los_dot = (rel_vel - np.dot(rel_vel, los_unit) * los_unit) / max(range_, 1e-6)
         return self._dispatch(rel_vel, los, range_, los_unit, los_dot, target_accel)
@@ -208,7 +232,20 @@ class TerminalGuidance:
         if not disable_fov and not self._in_fov(los_unit):
             return np.zeros(3)
 
-        target_accel = self.gravity if self.law == "apn" else None
+        if self.law == "apn":
+            if self.tracker is not None and self.tracker._initialized:
+                target_accel = self.tracker.acceleration()
+            else:
+                target_accel = self.gravity
+                if self.gravity_model is not None:
+                    try:
+                        target_accel = np.asarray(
+                            self.gravity_model(np.asarray(r, dtype=float), t=0.0), dtype=float
+                        )
+                    except Exception:
+                        pass
+        else:
+            target_accel = None
 
         if los_rate is not None:
             los_rate = np.asarray(los_rate, dtype=float)
