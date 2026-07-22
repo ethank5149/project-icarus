@@ -173,9 +173,23 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
     "ss18_satan": VehicleSTLInfo(
         key="ss18_satan",
         filename="ss-18-satan-missile.stl",
-        scale=1.0,
+        scale=2.0181,
         proxy_for="ss18_satan",
-        notes="OSINT RS-36 SS-18 Satan. Z-oriented, Y-centroid offset ~-0.55m.",
+        notes="OSINT RS-36 SS-18 Satan. Scaled to 34.0 m preset length.",
+    ),
+    "topol_m": VehicleSTLInfo(
+        key="topol_m",
+        filename="topol-m-missile.stl",
+        scale=2.3936,
+        proxy_for="topol_m",
+        notes="OSINT RT-2PM2 Topol-M. Z-oriented, scaled to 22.0 m preset length.",
+    ),
+    "df41": VehicleSTLInfo(
+        key="df41",
+        filename="df-41-missile.stl",
+        scale=2.2694,
+        proxy_for="df41",
+        notes="OSINT DF-41. Y-centroid offset present; normalizer recenters. Scaled to 16.5 m preset length.",
     ),
 }
 
