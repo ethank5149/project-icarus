@@ -9,7 +9,7 @@
 reference/GMTED2010/
 reference/ERA5/
 reference/models/
-reference/surrogates/
+reference/vehicles/
 
 # Dymos / OpenMDAO run outputs (regenerated on each trajectory-optimization run)
 *_out/

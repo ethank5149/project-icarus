@@ -16,9 +16,11 @@ used; every vertex is generated from public length/diameter/fin inputs.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 import numpy as np
+import yaml
 
 
 @dataclass
@@ -252,7 +254,7 @@ VEHICLE_PRESETS: Dict[str, VehicleGeometry] = {
         fin_leading_edge=0.2,
         fin_thickness=0.025,
         stl_alias="kh101",
-        metadata={"range_km": "2500-3500", "speed_mach": 0.8, "mass_kg": 2300, "warhead_kg": 450, "guidance": "inertial+GLONASS/TERCOM", "cep_m": "6-10", "launch_platform": "Tu-95MS, Tu-160"},
+        metadata={"range_km": "2500-2800", "speed_mach": 0.78, "mass_kg": 2400, "warhead_kg": 450, "guidance": "inertial+GLONASS/TERCOM", "cep_m": 15, "launch_platform": "Tu-95MS, Tu-160"},
         source="reference/threat-vehicle-deep-research-report.md",
     ),
     "kh102": VehicleGeometry(
@@ -437,7 +439,7 @@ VEHICLE_PRESETS: Dict[str, VehicleGeometry] = {
         tail_length=2.5,
         fin_count=0,
         stl_alias="ss18_satan",
-        metadata={"range_km": "11000-16000", "speed_mach": "~20 reentry", "warheads": "10x500-750 kt MIRVs", "cep_m": 0.5, "stage": "2-stage liquid", "status": "active (~46 mod6)", "service_since": 1988},
+        metadata={"range_km": 16000, "speed_mach": "Mach 22", "warheads": "10 x 0.5 Mt MIRV", "mass_t": 191, "cep_m": 500, "stage": "2-stage liquid", "status": "active (~46 mod6)", "service_since": 1988},
         source="reference/threat-vehicle-deep-research-report.md",
     ),
     "topol_m": VehicleGeometry(
@@ -449,7 +451,7 @@ VEHICLE_PRESETS: Dict[str, VehicleGeometry] = {
         tail_length=1.5,
         fin_count=0,
         stl_alias="topol_m",
-        metadata={"range_km": 11000, "speed_mach": "~20 reentry", "warhead_yield_kt": 550, "cep_m": 0.2, "stage": "3-stage solid", "launcher": "road-mobile or silo", "status": "active 1997-", "deployment": "~18 mobile, 60 silo (2016)"},
+        metadata={"range_km": 11000, "speed_mach": "Mach 20", "mass_t": 47.0, "warhead_yield_kt": 500, "warhead_kg": 1200, "cep_m": 200, "stage": "3-stage solid", "launcher": "road-mobile or silo", "status": "active 1997-", "deployment": "~18 mobile, 60 silo (2016)"},
         source="reference/threat-vehicle-deep-research-report.md",
     ),
     "yars": VehicleGeometry(
@@ -484,12 +486,13 @@ VEHICLE_PRESETS: Dict[str, VehicleGeometry] = {
         name="DF-5 series",
         body_length=32.0,
         body_diameter=3.0,
-        nose_length=7.0,
+        nose_length=6.0,
         nose_type="blunt",
-        nose_radius=1.3,
-        tail_length=2.2,
+        nose_radius=1.2,
+        tail_length=2.0,
         fin_count=0,
-        metadata={"range_km": "12000-13000", "speed_mach": "~20 reentry", "stage": "2-stage liquid", "warheads": "DF-5A single 3-5 Mt; DF-5B 3x150-200 kt MIRVs", "cep_m": 0.8, "launcher": "silo", "status": "active 1981-", "deployment": "~20 launchers (10 DF-5A, 10 DF-5B) as of 2016"},
+        stl_alias="df5",
+        metadata={"range_km": 13000, "speed_mach": "Mach 20", "stage": "2-stage liquid", "mass_t": 183, "warheads": "3000-4000 kg (nuclear MIRV)", "warhead_yield_kt": "3000-4000", "cep_m": 800, "launcher": "silo", "status": "active 1981-", "deployment": "~20 launchers (10 DF-5A, 10 DF-5B) as of 2016"},
         source="reference/threat-vehicle-deep-research-report.md",
     ),
     "df31": VehicleGeometry(
@@ -505,7 +508,8 @@ VEHICLE_PRESETS: Dict[str, VehicleGeometry] = {
         fin_tip_chord=0.4,
         fin_leading_edge=0.3,
         fin_thickness=0.03,
-        metadata={"range_km": "7200-8000 (DF-31A ~13000)", "speed_mach": "~20 reentry", "stage": "3-stage solid", "warhead_yield_kt": 425, "guidance": "inertial", "cep_m": 100, "launcher": "road-mobile 8x8 TEL", "status": "active 2006-", "deployment": "~36 launchers (3 brigades) by 2019"},
+        stl_alias="df31",
+        metadata={"range_km": 11700, "speed_mach": "Mach 25", "stage": "3-stage solid", "mass_t": 42, "payload_kg": "1050-1750", "warhead_yield_kt": "MRV", "guidance": "inertial", "cep_m": "150-300", "launcher": "road-mobile 8x8 TEL", "status": "active 2006-", "deployment": "~36 launchers (3 brigades) by 2019"},
         source="reference/threat-vehicle-deep-research-report.md",
     ),
     "df41": VehicleGeometry(
@@ -522,7 +526,7 @@ VEHICLE_PRESETS: Dict[str, VehicleGeometry] = {
         fin_leading_edge=0.35,
         fin_thickness=0.035,
         stl_alias="df41",
-        metadata={"range_km": "12000-15000", "speed_mach": "~20 reentry", "propulsion": "3-stage solid", "payload_kg": 2500, "warheads": "up to 10 MIRVs (20-150 kt)", "guidance": "inertial/GPS", "cep_m": "100-500", "launcher": "road/rail/silo", "status": "testing/limited, possibly ~20 launchers as of 2022"},
+        metadata={"range_km": "12000-15000", "speed_mach": "Mach 22", "mass_t": 80, "payload_kg": 2500, "warheads": "up to 10 MIRVs (20-150 kt)", "guidance": "inertial/GPS", "cep_m": 100, "launcher": "road/rail/silo", "status": "testing/limited, possibly ~20 launchers as of 2022"},
         source="reference/threat-vehicle-deep-research-report.md",
     ),
     "df17_dfzf": VehicleGeometry(
@@ -591,7 +595,7 @@ VEHICLE_PRESETS: Dict[str, VehicleGeometry] = {
         fin_tip_chord=0.4,
         fin_leading_edge=0.3,
         fin_thickness=0.04,
-        metadata={"range_km": "1500-2000", "speed_mach": "4 climb, ~10 descent", "warhead_kg": 480, "warhead_yield_kt": "conventional or nuclear", "guidance": "inertial + possible IR terminal", "status": "active 2017-", "launch_platform": "MiG-31K, Tu-22M3", "launchers": "~100 MiG-31K believed"},
+        metadata={"range_km": "1500-2000", "speed_mach": "Mach 10", "mass_t": 4.3, "warhead_kg": 480, "warhead_yield_kt": "conventional or nuclear", "guidance": "inertial + possible IR terminal", "status": "active 2017-", "launch_platform": "MiG-31K, Tu-22M3", "launchers": "~100 MiG-31K believed"},
         source="reference/threat-vehicle-deep-research-report.md",
     ),
     "cj1000": VehicleGeometry(
@@ -709,6 +713,647 @@ VEHICLE_PRESETS: Dict[str, VehicleGeometry] = {
         metadata={"range_km": 1500, "warhead": "maneuvering reentry, nuclear-capable", "booster": "derivative of DF-21D", "status": "developmental, flight tests undisclosed", "launch_platform": "H-6N bomber"},
         source="reference/threat-vehicle-deep-research-report.md",
     ),
+    "aim120": VehicleGeometry(
+        name="AIM-120 (AMRAAM)",
+        body_length=3.65,
+        body_diameter=0.178,
+        nose_length=0.9,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=0.5,
+        fin_count=4,
+
+        fin_span=0.5,
+        fin_root_chord=1.0,
+        fin_tip_chord=0.5,
+        fin_leading_edge=0.2,
+        fin_thickness=0.03,
+
+        stl_alias="aim120",
+        metadata={"range_km": "130–160 (AIM‑120D)", "speed_mach": "Mach 4", "mass_t": "0.1615", "payload": "20 kg blast-frag", "cep_m": "– (modern AAM, few m)"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "atacms": VehicleGeometry(
+        name="MGM-140 (ATACMS)",
+        body_length=4.0,
+        body_diameter=0.61,
+        nose_length=1.0,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=0.6,
+        fin_count=4,
+
+        fin_span=1.4,
+        fin_root_chord=2.8,
+        fin_tip_chord=1.4,
+        fin_leading_edge=0.7,
+        fin_thickness=0.03,
+
+        stl_alias="atacms",
+        metadata={"range_km": "300 (block IA)", "speed_mach": ">Mach 3", "mass_t": "1.67", "payload": "950 bomblets or 213 kg unitary", "cep_m": "~100–250"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "tomahawk": VehicleGeometry(
+        name="BGM-109 (Tomahawk)",
+        body_length=5.56,
+        body_diameter=0.52,
+        nose_length=1.4,
+        nose_type="ogive",
+        nose_radius=0.0,
+        tail_length=0.8,
+        fin_count=4,
+
+        fin_span=2.7,
+        fin_root_chord=5.3,
+        fin_tip_chord=2.7,
+        fin_leading_edge=1.3,
+        fin_thickness=0.03,
+
+        stl_alias="tomahawk",
+        metadata={"range_km": "2500 (Block II)", "speed_mach": "~Mach 0.74", "mass_t": "1.30", "payload": "450 kg unitary or 266 kg submunitions", "cep_m": "– (GPS/INS guided)"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "harpoon": VehicleGeometry(
+        name="RGM-84 (Harpoon)",
+        body_length=4.6,
+        body_diameter=0.343,
+        nose_length=1.1,
+        nose_type="ogive",
+        nose_radius=0.0,
+        tail_length=0.7,
+        fin_count=4,
+
+        fin_span=3.1,
+        fin_root_chord=6.2,
+        fin_tip_chord=3.1,
+        fin_leading_edge=1.6,
+        fin_thickness=0.03,
+
+        stl_alias="harpoon",
+        metadata={"range_km": "124–240", "speed_mach": "0.85", "mass_t": "0.691", "payload": "224 kg high-explosive", "cep_m": "–"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "hwasong12": VehicleGeometry(
+        name="Hwasong-12 (KN-17)",
+        body_length=17.4,
+        body_diameter=1.65,
+        nose_length=4.3,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=2.6,
+        fin_count=0,
+
+        stl_alias="hwasong12",
+        metadata={"range_km": "4500", "speed_mach": "(ICBM class)", "mass_t": "–", "payload": "~500 kg (nuclear)", "cep_m": "–"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "hwasong14": VehicleGeometry(
+        name="Hwasong-14 (KN-20)",
+        body_length=19.8,
+        body_diameter=1.85,
+        nose_length=5.0,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=3.0,
+        fin_count=0,
+
+        stl_alias="hwasong14",
+        metadata={"range_km": "~10,000", "speed_mach": "(ICBM)", "mass_t": "–", "payload": "(nuclear)", "cep_m": "–"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "hwasong15": VehicleGeometry(
+        name="Hwasong-15 (KN-22)",
+        body_length=22.0,
+        body_diameter=2.2,
+        nose_length=5.5,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=3.3,
+        fin_count=0,
+
+        stl_alias="hwasong15",
+        metadata={"range_km": "~13,000", "speed_mach": "(ICBM)", "mass_t": "–", "payload": "(nuclear)", "cep_m": "–"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "hwasong17": VehicleGeometry(
+        name="Hwasong-17",
+        body_length=25.0,
+        body_diameter=2.5,
+        nose_length=6.2,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=3.8,
+        fin_count=0,
+
+        stl_alias="hwasong17",
+        metadata={"range_km": "15,000", "speed_mach": "(ICBM)", "mass_t": "80–110", "payload": "(nuclear)", "cep_m": "–"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "kh47m2": VehicleGeometry(
+        name="Kh-47M2 (Kinzhal)",
+        body_length=8.0,
+        body_diameter=1.2,
+        nose_length=2.0,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=1.2,
+        fin_count=0,
+
+        stl_alias="kh47m2",
+        metadata={"range_km": "1500–2000", "speed_mach": "Mach 10", "mass_t": "4.3", "payload": "480 kg (conventional/nuclear)", "cep_m": "–"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "slam": VehicleGeometry(
+        name="SLAM (Project Pluto)",
+        body_length=9.0,
+        body_diameter=1.454,
+        nose_length=2.2,
+        nose_type="ogive",
+        nose_radius=0.0,
+        tail_length=1.4,
+        fin_count=0,
+
+        stl_alias="slam",
+        metadata={"range_km": "182,000", "speed_mach": "Mach 4.2", "mass_t": "(nuclear engine)", "payload": "16 x 0.3 Mt nuclear", "cep_m": "-"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "skybolt": VehicleGeometry(
+        name="GAM-87 (AGM-48) Skybolt",
+        body_length=11.66,
+        body_diameter=0.89,
+        nose_length=2.9,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=1.7,
+        fin_count=4,
+
+        fin_span=1.7,
+        fin_root_chord=3.4,
+        fin_tip_chord=1.7,
+        fin_leading_edge=0.8,
+        fin_thickness=0.03,
+
+        stl_alias="skybolt",
+        metadata={"range_km": "1850", "speed_mach": "Mach 12", "mass_t": "5.0", "payload": "1 Mt W59", "cep_m": "–"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "titan2": VehicleGeometry(
+        name="LGM-25C Titan II",
+        body_length=32.92,
+        body_diameter=3.05,
+        nose_length=8.2,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=4.9,
+        fin_count=0,
+
+        stl_alias="titan2",
+        metadata={"range_km": "14,484", "speed_mach": "(~Mach 23)", "mass_t": "149.7", "payload": "9–15 Mt (W-53)", "cep_m": "–"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "lance": VehicleGeometry(
+        name="MGM-52 (Lance)",
+        body_length=6.41,
+        body_diameter=0.56,
+        nose_length=1.6,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=1.0,
+        fin_count=0,
+
+        stl_alias="lance",
+        metadata={"range_km": "130", "speed_mach": "Mach 3 (est)", "mass_t": "1.527", "payload": "W-70 (100 kt)", "cep_m": "150"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "corporal": VehicleGeometry(
+        name="MGM-5 Corporal",
+        body_length=13.7,
+        body_diameter=0.762,
+        nose_length=3.4,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=2.1,
+        fin_count=4,
+
+        fin_span=2.1,
+        fin_root_chord=4.3,
+        fin_tip_chord=2.1,
+        fin_leading_edge=1.1,
+        fin_thickness=0.03,
+
+        stl_alias="corporal",
+        metadata={"range_km": "128", "speed_mach": "(subsonic)", "mass_t": "6.0", "payload": "W-7 nuclear (~1 kt)", "cep_m": "<300"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "midgetman": VehicleGeometry(
+        name="MGM-134A (Midgetman)",
+        body_length=14.0,
+        body_diameter=1.17,
+        nose_length=3.5,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=2.1,
+        fin_count=0,
+
+        stl_alias="midgetman",
+        metadata={"range_km": "10,944 (6800 mi)", "speed_mach": "(~Mach 23)", "mass_t": "13.6 (30,000 lb)", "payload": "475 kt W87", "cep_m": "– (GPS/INS ~120 m)"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "pac2": VehicleGeometry(
+        name="MIM-104 PAC-2 (Patriot)",
+        body_length=5.79,
+        body_diameter=0.8636,
+        nose_length=1.4,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=0.9,
+        fin_count=0,
+
+        stl_alias="pac2",
+        metadata={"range_km": "97", "speed_mach": "Mach 4.6", "mass_t": "~0.90 (900 kg)**", "payload": "88 kg HE submunition†", "cep_m": "~5 (hit-to-kill)"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "pac3_cri": VehicleGeometry(
+        name="MIM-104 PAC-3 CRI",
+        body_length=5.2,
+        body_diameter=0.41,
+        nose_length=1.3,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=0.8,
+        fin_count=0,
+
+        stl_alias="pac3_cri",
+        metadata={"range_km": "20", "speed_mach": "Mach 4.2†", "mass_t": "0.32", "payload": "Kinetic (no explosive)", "cep_m": "~10"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "pac3_mse": VehicleGeometry(
+        name="MIM-104 PAC-3 MSE",
+        body_length=5.2,
+        body_diameter=0.41,
+        nose_length=1.3,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=0.8,
+        fin_count=0,
+
+        stl_alias="pac3_mse",
+        metadata={"range_km": "30", "speed_mach": "Mach 4.2†", "mass_t": "0.32†", "payload": "Kinetic (no explosive)", "cep_m": "~5"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "redstone": VehicleGeometry(
+        name="PGM-11 Redstone",
+        body_length=21.1,
+        body_diameter=1.78,
+        nose_length=5.3,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=3.2,
+        fin_count=4,
+
+        fin_span=3.7,
+        fin_root_chord=7.3,
+        fin_tip_chord=3.7,
+        fin_leading_edge=1.8,
+        fin_thickness=0.03,
+
+        stl_alias="redstone",
+        metadata={"range_km": "325", "speed_mach": "Mach 5.5", "mass_t": "27.8", "payload": "W39 (4 Mt)", "cep_m": "300"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "v2": VehicleGeometry(
+        name="V-2 (A-4 rocket)",
+        body_length=14.0,
+        body_diameter=1.65,
+        nose_length=3.5,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=2.1,
+        fin_count=4,
+
+        fin_span=3.6,
+        fin_root_chord=7.1,
+        fin_tip_chord=3.6,
+        fin_leading_edge=1.8,
+        fin_thickness=0.03,
+
+        stl_alias="v2",
+        metadata={"range_km": "320", "speed_mach": "Mach 4.8", "mass_t": "12.5", "payload": "2,180 lb (~990 kg) high-explosive", "cep_m": "~20,000 (approx)"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "ababeel": VehicleGeometry(
+        name="Ababeel",
+        body_length=3.5,
+        body_diameter=1.7,
+        nose_length=0.9,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=0.5,
+        fin_count=0,
+
+        stl_alias="ababeel",
+        metadata={"range_km": "2,200", "speed_mach": "(ballistic reentry) ~Mach 15-25", "mass_t": "-", "payload": "MIRV (multiple nuclear warheads)", "cep_m": "-"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "jassm": VehicleGeometry(
+        name="AGM-158 (JASSM)",
+        body_length=4.27,
+        body_diameter=0.55,
+        nose_length=1.1,
+        nose_type="ogive",
+        nose_radius=0.0,
+        tail_length=0.6,
+        fin_count=4,
+
+        fin_span=2.4,
+        fin_root_chord=4.8,
+        fin_tip_chord=2.4,
+        fin_leading_edge=1.2,
+        fin_thickness=0.03,
+
+        stl_alias="jassm",
+        metadata={"range_km": "370 (A) (1000 for ER)", "speed_mach": "Subsonic (~Mach 0.7)", "mass_t": "1.02", "payload": "450 kg WDU-42/B penetrator", "cep_m": "3"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "sram": VehicleGeometry(
+        name="AGM-69A (SRAM)",
+        body_length=4.83,
+        body_diameter=0.44,
+        nose_length=1.2,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=0.7,
+        fin_count=0,
+
+        stl_alias="sram",
+        metadata={"range_km": "200", "speed_mach": "Mach 3", "mass_t": "1.01", "payload": "W69 nuclear (170–200 kt)", "cep_m": "430"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "thor": VehicleGeometry(
+        name="PGM-17 Thor",
+        body_length=19.81,
+        body_diameter=2.44,
+        nose_length=5.0,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=3.0,
+        fin_count=0,
+
+        stl_alias="thor",
+        metadata={"range_km": "2414", "speed_mach": "(Mach 10)", "mass_t": "49.9", "payload": "~1 Mt (W-49)", "cep_m": "–"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "jupiter": VehicleGeometry(
+        name="PGM-19 Jupiter",
+        body_length=18.39,
+        body_diameter=2.67,
+        nose_length=4.6,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=2.8,
+        fin_count=0,
+
+        stl_alias="jupiter",
+        metadata={"range_km": "2400", "speed_mach": "(ballistic Mach ~23)", "mass_t": "49.885", "payload": "1440 kt (W49)", "cep_m": "1800"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "titan1": VehicleGeometry(
+        name="HGM-25A Titan I",
+        body_length=29.87,
+        body_diameter=3.05,
+        nose_length=7.5,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=4.5,
+        fin_count=0,
+
+        stl_alias="titan1",
+        metadata={"range_km": "10,130", "speed_mach": "(~Mach 24)", "mass_t": "49.9", "payload": "3.75 Mt (W-38)", "cep_m": "–"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "pershing2": VehicleGeometry(
+        name="Pershing II",
+        body_length=10.61,
+        body_diameter=1.02,
+        nose_length=2.7,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=1.6,
+        fin_count=0,
+
+        stl_alias="pershing2",
+        metadata={"range_km": "1700", "speed_mach": "(Mach 6)", "mass_t": "7.4", "payload": "W85 (5–80 kt)", "cep_m": "30"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "qiam1": VehicleGeometry(
+        name="Qiam-1",
+        body_length=11.85,
+        body_diameter=0.888,
+        nose_length=3.0,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=1.8,
+        fin_count=0,
+
+        stl_alias="qiam1",
+        metadata={"range_km": "800", "speed_mach": "(Mach 5)", "mass_t": "6.0–6.2", "payload": "~750 kg (conventional)", "cep_m": "500"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "r14": VehicleGeometry(
+        name="R-14 (SS-5 Skean)",
+        body_length=24.4,
+        body_diameter=2.4,
+        nose_length=6.1,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=3.7,
+        fin_count=0,
+
+        stl_alias="r14",
+        metadata={"range_km": "4500", "speed_mach": "(Mach 20)", "mass_t": "86", "payload": "1500 kg (2 Mt)", "cep_m": "–"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "scudb": VehicleGeometry(
+        name="Scud-B (R-17E)",
+        body_length=11.25,
+        body_diameter=0.88,
+        nose_length=2.8,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=1.7,
+        fin_count=0,
+
+        stl_alias="scudb",
+        metadata={"range_km": "300", "speed_mach": "~Mach 5.5", "mass_t": "~5.9 (8,350 lb)", "payload": "985 kg HE/nuclear", "cep_m": "450–900"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "shaheen3": VehicleGeometry(
+        name="Shaheen-3",
+        body_length=19.3,
+        body_diameter=1.4,
+        nose_length=4.8,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=2.9,
+        fin_count=0,
+
+        stl_alias="shaheen3",
+        metadata={"range_km": "2750", "speed_mach": "(Mach 15)", "mass_t": "–", "payload": "(nuclear)", "cep_m": "–"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "brahmos": VehicleGeometry(
+        name="BrahMos",
+        body_length=8.2,
+        body_diameter=0.67,
+        nose_length=2.0,
+        nose_type="ogive",
+        nose_radius=0.0,
+        tail_length=1.2,
+        fin_count=0,
+
+        metadata={"range_km": "500", "speed_mach": "Mach 2.8", "mass_t": "3.0", "payload": "300 kg high-explosive", "cep_m": "- (est. ~10)"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "df3a": VehicleGeometry(
+        name="DF-3A (CSS-2)",
+        body_length=24.0,
+        body_diameter=3.0,
+        nose_length=6.0,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=3.6,
+        fin_count=0,
+
+        stl_alias="df3a",
+        metadata={"range_km": "4500", "speed_mach": "(ICBM class ~Mach 20)", "mass_t": "–", "payload": "3–5 Mt (5,000 kg)", "cep_m": "~2000"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "df3": VehicleGeometry(
+        name="DF-3 (CSS-2)",
+        body_length=24.0,
+        body_diameter=3.0,
+        nose_length=6.0,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=3.6,
+        fin_count=0,
+
+        stl_alias="df3",
+        metadata={"range_km": "2500 (older)", "speed_mach": "~Mach 20", "mass_t": "–", "payload": "~2400 kg (nuclear)", "cep_m": "–"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "df5a": VehicleGeometry(
+        name="DF-5A (CSS-4)",
+        body_length=32.6,
+        body_diameter=3.35,
+        nose_length=8.2,
+        nose_type="blunt",
+        nose_radius=1.7,
+        tail_length=4.9,
+        fin_count=0,
+
+        stl_alias="df5a",
+        metadata={"range_km": "13,000", "speed_mach": "~Mach 20", "mass_t": "183", "payload": "3000–4000 kg (nuclear MIRV)", "cep_m": "800"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "df5b": VehicleGeometry(
+        name="DF-5B (CSS-4)",
+        body_length=32.6,
+        body_diameter=3.35,
+        nose_length=8.2,
+        nose_type="blunt",
+        nose_radius=1.7,
+        tail_length=4.9,
+        fin_count=0,
+
+        stl_alias="df5b",
+        metadata={"range_km": "13,000 (same)", "speed_mach": "~Mach 20", "mass_t": "183 (same)", "payload": "3000–4000 kg (nuclear)", "cep_m": "~300"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "df31ag": VehicleGeometry(
+        name="DF-31AG",
+        body_length=14.5,
+        body_diameter=2.0,
+        nose_length=3.6,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=2.2,
+        fin_count=0,
+
+        stl_alias="df31ag",
+        metadata={"range_km": "11,700", "speed_mach": "(Mach 25)", "mass_t": "42", "payload": "1050–1750 kg (MRV)", "cep_m": "150–300"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "mx": VehicleGeometry(
+        name="LGM-118 (MX)",
+        body_length=21.1,
+        body_diameter=2.34,
+        nose_length=5.3,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=3.2,
+        fin_count=0,
+
+        stl_alias="mx",
+        metadata={"range_km": "9600", "speed_mach": "(~Mach 23)", "mass_t": "87.75", "payload": "10 × ~300–475 kt (MIRV)", "cep_m": "90"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "minuteman2": VehicleGeometry(
+        name="LGM-30F (Minuteman II)",
+        body_length=18.2,
+        body_diameter=1.87,
+        nose_length=4.5,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=2.7,
+        fin_count=0,
+
+        stl_alias="minuteman2",
+        metadata={"range_km": "12,500", "speed_mach": "(~Mach 24)", "mass_t": "31.75", "payload": "1.2 Mt W56", "cep_m": "200"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "minuteman3": VehicleGeometry(
+        name="LGM-30G (Minuteman III)",
+        body_length=18.2,
+        body_diameter=1.85,
+        nose_length=4.5,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=2.7,
+        fin_count=0,
+
+        stl_alias="minuteman3",
+        metadata={"range_km": "13,000", "speed_mach": "(~Mach 24)", "mass_t": "34.467", "payload": "3 × (300 kt) (deployed 1 RV)", "cep_m": "120"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "minuteman1a": VehicleGeometry(
+        name="LGM-30A (Minuteman I)",
+        body_length=16.45,
+        body_diameter=1.88,
+        nose_length=4.1,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=2.5,
+        fin_count=0,
+
+        stl_alias="minuteman1a",
+        metadata={"range_km": "10,000", "speed_mach": "(~Mach 24)", "mass_t": "29.5", "payload": "1 Mt W59", "cep_m": "~1500 (est.)"},
+        source="reference/additional-vehicle-specs.md",
+    ),
+    "minuteman1b": VehicleGeometry(
+        name="LGM-30B (Minuteman I)",
+        body_length=17.0,
+        body_diameter=1.88,
+        nose_length=4.2,
+        nose_type="cone",
+        nose_radius=0.0,
+        tail_length=2.5,
+        fin_count=0,
+
+        stl_alias="minuteman1b",
+        metadata={"range_km": "~10,000 (similar)", "speed_mach": "(~Mach 24)", "mass_t": "~29.5 (same)", "payload": "1 Mt W59", "cep_m": "(similar)"},
+        source="reference/additional-vehicle-specs.md",
+    ),
 }
 
 
@@ -720,6 +1365,45 @@ def get_vehicle(name: str) -> VehicleGeometry:
             f"Unknown vehicle '{name}'. Known: {sorted(VEHICLE_PRESETS)}"
         )
     return VEHICLE_PRESETS[key]
+
+
+# --- Per-vehicle data package helpers ---------------------------------------- #
+
+_VEHICLE_BASE = (
+    Path(__file__).resolve().parent.parent.parent / "reference" / "vehicles"
+)
+
+
+def vehicle_dir(key: str) -> Path:
+    """Return the per-vehicle directory under ``reference/vehicles/``."""
+    return _VEHICLE_BASE / key
+
+
+def vehicle_specs_path(key: str) -> Path:
+    """Return the path to ``specs.yml`` for a vehicle."""
+    return vehicle_dir(key) / "specs.yml"
+
+
+def load_vehicle_specs(key: str) -> Optional[Dict]:
+    """Load reference technical specs from ``reference/vehicles/<key>/specs.yml``.
+
+    Returns ``None`` if the file does not exist.  The ``key`` is matched
+    case-insensitively against known ``VEHICLE_PRESETS`` entries.
+    """
+    path = vehicle_specs_path(key)
+    if not path.exists():
+        return None
+    with open(path, "r", encoding="utf-8") as fh:
+        return yaml.safe_load(fh)
+
+
+def list_vehicles() -> List[str]:
+    """Return all vehicle keys that have a per-vehicle data package."""
+    if not _VEHICLE_BASE.is_dir():
+        return []
+    return sorted(
+        p.name for p in _VEHICLE_BASE.iterdir() if p.is_dir() and (p / "specs.yml").exists()
+    )
 
 
 # --- Profile functions ------------------------------------------------------ #

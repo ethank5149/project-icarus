@@ -102,8 +102,9 @@ class TestManifest:
         assert "kh101" in CAD_MANIFEST
         info = CAD_MANIFEST["kh101"]
         assert isinstance(info, VehicleSTLInfo)
-        assert info.scale == 0.001
+        assert info.scale == 1.0
         assert info.proxy_for == "kh101"
+        assert info.filename == "model.stl"
 
     def test_manifest_values_are_sane(self):
         for key, info in CAD_MANIFEST.items():
@@ -221,7 +222,7 @@ class TestCfdIntegration:
             save_sweep_hdf5(result, h5_path)
             assert os.path.exists(h5_path)
 
-            model = train_vehicle_gpr("kh101_stl", h5_path=h5_path, model_dir=str(tmp_path))
+            model = train_vehicle_gpr("kh101_stl", h5_path=h5_path, base_dir=str(tmp_path))
             pred = model.predict(np.array([[1.5, 2.5, 0.0, 10e3, 0.0]]))
             assert pred.shape == (1, 5)
             assert np.all(np.isfinite(pred))

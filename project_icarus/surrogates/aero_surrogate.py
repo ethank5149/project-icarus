@@ -26,7 +26,9 @@ class AeroSurrogateComponent(ExplicitComponent):
             model_path = self.options["model_path"]
             base = os.path.dirname(model_path) if os.path.dirname(model_path) else "."
             vkey = self.options["vehicle_key"]
-            candidate = os.path.join(base, f"aero_surrogate_{vkey}.pkl")
+            candidate = os.path.join(base, "vehicles", vkey, "surrogate.pkl")
+            if not os.path.exists(candidate):
+                candidate = os.path.join(base, f"aero_surrogate_{vkey}.pkl")
             if os.path.exists(candidate):
                 model_path = candidate
         else:

@@ -178,8 +178,8 @@ class TestRunVehicleSweep:
 
 class TestPerVehicleGPR:
     def test_default_paths(self):
-        assert default_model_path("arrow3") == "reference/surrogates/aero_surrogate_arrow3.pkl"
-        assert default_h5_path("arrow3") == "reference/surrogates/aero_arrow3.h5"
+        assert default_model_path("arrow3") == "reference/vehicles/arrow3/surrogate.pkl"
+        assert default_h5_path("arrow3") == "reference/vehicles/arrow3/aero.h5"
 
     def test_train_and_load_vehicle_model(self):
         with tempfile.TemporaryDirectory() as td:
@@ -195,11 +195,11 @@ class TestPerVehicleGPR:
             from project_icarus.aero.cfd_generators import sweep_to_hdf5
             sweep_to_hdf5(spec, h5_path)
 
-            model_path = os.path.join(td, "aero_surrogate_tamir.pkl")
-            model = train_vehicle_gpr("tamir", h5_path=h5_path, model_dir=td)
+            model_path = os.path.join(td, "vehicles", "tamir", "surrogate.pkl")
+            model = train_vehicle_gpr("tamir", h5_path=h5_path, base_dir=td)
             assert os.path.exists(model_path)
 
-            loaded = load_vehicle_gpr("tamir", model_dir=td)
+            loaded = load_vehicle_gpr("tamir", base_dir=td)
             assert loaded is not None
 
             X = np.array([[1.0, 0.0, 0.0, 10e3, 0.0]])
@@ -220,8 +220,8 @@ class TestPerVehicleGPR:
             )
             from project_icarus.aero.cfd_generators import sweep_to_hdf5
             sweep_to_hdf5(spec, h5_path)
-            model_path = os.path.join(td, "aero_surrogate_tamir.pkl")
-            model = train_vehicle_gpr("tamir", h5_path=h5_path, model_dir=td)
+            model_path = os.path.join(td, "vehicles", "tamir", "surrogate.pkl")
+            model = train_vehicle_gpr("tamir", h5_path=h5_path, base_dir=td)
             X = np.array([[1.0, 0.0, 0.0, 10e3, 0.0],
                           [2.0, 3.0, 1.0, 30e3, 2.0]])
             J = model.analytical_jacobian(X)
@@ -241,5 +241,5 @@ class TestPerVehicleGPR:
             )
             from project_icarus.aero.cfd_generators import sweep_to_hdf5
             sweep_to_hdf5(spec, h5_path)
-            model = train_vehicle_gpr("tamir", h5_path=h5_path, model_dir=td)
+            model = train_vehicle_gpr("tamir", h5_path=h5_path, base_dir=td)
             assert model is not None

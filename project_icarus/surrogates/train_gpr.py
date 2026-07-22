@@ -250,29 +250,51 @@ def train_gpr(filename="aero_data.h5", model_path="aero_surrogate.pkl"):
     return model
 
 
-def default_model_path(vehicle_key: str, model_dir: str = "reference/surrogates") -> str:
-    return os.path.join(model_dir, f"aero_surrogate_{vehicle_key}.pkl")
+def default_model_path(vehicle_key: str, base_dir: str = "reference") -> str:
+    return os.path.join(base_dir, "vehicles", vehicle_key, "surrogate.pkl")
 
 
-def default_h5_path(vehicle_key: str, model_dir: str = "reference/surrogates") -> str:
-    return os.path.join(model_dir, f"aero_{vehicle_key}.h5")
+def default_h5_path(vehicle_key: str, base_dir: str = "reference") -> str:
+    return os.path.join(base_dir, "vehicles", vehicle_key, "aero.h5")
 
 
-def load_vehicle_gpr(vehicle_key: str, model_dir: str = "reference/surrogates"):
-    """Load a per-vehicle GPR surrogate. Falls back to generic if missing."""
+def load_vehicle_gpr(vehicle_key: str, base_dir: str = "reference"):
+    """Load a per-vehicle GPR surrogate. Falls back to legacy locations."""
     import os
-    path = default_model_path(vehicle_key, model_dir)
-    if not os.path.exists(path):
-        path = os.path.join(model_dir, "aero_surrogate_generic.pkl")
-    if not os.path.exists(path):
-        path = "aero_surrogate.pkl"
-    return load(path)
+
+    # New per-vehicle location
+    path = default_model_path(vehicle_key, base_dir)
+    if os.path.exists(path):
+        return load(path)
+
+    # Legacy flat fallback
+    legacy = os.path.join(base_dir, "surrogates", f"aero_surrogate_{vehicle_key}.pkl")
+    if os.path.exists(legacy):
+        return load(legacy)
+
+    # Generic fallback
+    generic = os.path.join(base_dir, "surrogates", "aero_surrogate_generic.pkl")
+    if os.path.exists(generic):
+        return load(generic)
+
+    # Root fallback
+    if os.path.exists("aero_surrogate.pkl"):
+        return load("aero_surrogate.pkl")
+
+    raise FileNotFoundError(
+        f"No surrogate found for '{vehicle_key}'. "
+        "Expected one of:\n"
+        f"  {path}\n"
+        f"  {legacy}\n"
+        f"  {generic}\n"
+        f"  aero_surrogate.pkl"
+    )
 
 
 def train_vehicle_gpr(
     vehicle_key: str,
     h5_path: Optional[str] = None,
-    model_dir: str = "reference/surrogates",
+    base_dir: str = "reference",
     model_path: Optional[str] = None,
 ):
     """Train and save a per-vehicle GPR surrogate.
@@ -283,11 +305,11 @@ def train_vehicle_gpr(
         Vehicle identifier (matches VEHICLE_PRESETS key).
     h5_path : str, optional
         Path to the per-vehicle HDF5 sweep data. Defaults to
-        ``<model_dir>/aero_<vehicle_key>.h5``.
-    model_dir : str
-        Directory for output pickle. Created if missing.
+        ``<base_dir>/vehicles/<vehicle_key>/aero.h5``.
+    base_dir : str
+        Root reference directory. Defaults to ``"reference"``.
     model_path : str, optional
-        Explicit output path. Defaults to ``<model_dir>/aero_surrogate_<vehicle_key>.pkl``.
+        Explicit output path. Defaults to ``<base_dir>/vehicles/<vehicle_key>/surrogate.pkl``.
 
     Returns
     -------
@@ -296,9 +318,9 @@ def train_vehicle_gpr(
     """
     import os
     if h5_path is None:
-        h5_path = default_h5_path(vehicle_key, model_dir)
+        h5_path = default_h5_path(vehicle_key, base_dir)
     if model_path is None:
-        model_path = default_model_path(vehicle_key, model_dir)
+        model_path = default_model_path(vehicle_key, base_dir)
     os.makedirs(os.path.dirname(os.path.abspath(model_path)), exist_ok=True)
     X, y, sigma = load_data(h5_path)
     model = MultiOutputGPR()

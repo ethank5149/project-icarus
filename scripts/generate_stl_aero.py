@@ -2,8 +2,8 @@
 
 This script runs a structured (Mach, alpha, beta, altitude, delta) sweep for
 each confirmed CAD vehicle and writes:
-  - HDF5 coefficient table: reference/surrogates/aero_<key>.h5
-  - GPR surrogate pickle: reference/surrogates/aero_surrogate_<key>.pkl
+  - HDF5 coefficient table: reference/vehicles/<key>/aero.h5
+  - GPR surrogate pickle: reference/vehicles/<key>/surrogate.pkl
 
 Vehicles are selected from project_icarus.aero.stl_loader.CAD_MANIFEST.
 """

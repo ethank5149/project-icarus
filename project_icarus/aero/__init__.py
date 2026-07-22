@@ -8,6 +8,10 @@ from .geometry import (
     build_surface_mesh,
     surface_area,
     wetted_area,
+    vehicle_dir,
+    vehicle_specs_path,
+    load_vehicle_specs,
+    list_vehicles,
 )
 from .cfd_generators import (
     SweepSpec,
