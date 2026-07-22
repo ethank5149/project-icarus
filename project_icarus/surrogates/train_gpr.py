@@ -1,4 +1,7 @@
 import h5py
+import os
+from typing import Optional
+import h5py
 import numpy as np
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C, WhiteKernel, Product, Sum
@@ -241,6 +244,68 @@ def train_gpr(filename="aero_data.h5", model_path="aero_surrogate.pkl"):
 
     scores = model.kfold_cv(X, y, n_splits=5)
     print("K-fold RMSE:")
+    for name, score in scores.items():
+        print(f"  {name}: {score:.4f}")
+    print(f"Surrogate trained and saved to {model_path}")
+    return model
+
+
+def default_model_path(vehicle_key: str, model_dir: str = "reference/surrogates") -> str:
+    return os.path.join(model_dir, f"aero_surrogate_{vehicle_key}.pkl")
+
+
+def default_h5_path(vehicle_key: str, model_dir: str = "reference/surrogates") -> str:
+    return os.path.join(model_dir, f"aero_{vehicle_key}.h5")
+
+
+def load_vehicle_gpr(vehicle_key: str, model_dir: str = "reference/surrogates"):
+    """Load a per-vehicle GPR surrogate. Falls back to generic if missing."""
+    import os
+    path = default_model_path(vehicle_key, model_dir)
+    if not os.path.exists(path):
+        path = os.path.join(model_dir, "aero_surrogate_generic.pkl")
+    if not os.path.exists(path):
+        path = "aero_surrogate.pkl"
+    return load(path)
+
+
+def train_vehicle_gpr(
+    vehicle_key: str,
+    h5_path: Optional[str] = None,
+    model_dir: str = "reference/surrogates",
+    model_path: Optional[str] = None,
+):
+    """Train and save a per-vehicle GPR surrogate.
+
+    Parameters
+    ----------
+    vehicle_key : str
+        Vehicle identifier (matches VEHICLE_PRESETS key).
+    h5_path : str, optional
+        Path to the per-vehicle HDF5 sweep data. Defaults to
+        ``<model_dir>/aero_<vehicle_key>.h5``.
+    model_dir : str
+        Directory for output pickle. Created if missing.
+    model_path : str, optional
+        Explicit output path. Defaults to ``<model_dir>/aero_surrogate_<vehicle_key>.pkl``.
+
+    Returns
+    -------
+    MultiOutputGPR
+        Trained surrogate model.
+    """
+    import os
+    if h5_path is None:
+        h5_path = default_h5_path(vehicle_key, model_dir)
+    if model_path is None:
+        model_path = default_model_path(vehicle_key, model_dir)
+    os.makedirs(os.path.dirname(os.path.abspath(model_path)), exist_ok=True)
+    X, y, sigma = load_data(h5_path)
+    model = MultiOutputGPR()
+    model.fit(X, y)
+    dump(model, model_path)
+    scores = model.kfold_cv(X, y, n_splits=5)
+    print(f"Vehicle '{vehicle_key}' K-fold RMSE:")
     for name, score in scores.items():
         print(f"  {name}: {score:.4f}")
     print(f"Surrogate trained and saved to {model_path}")

@@ -383,6 +383,7 @@ class BallisticScenario:
     cd: float = 0.3
     area: float = 0.02
     mass: float = 1000.0
+    geometry_key: str = "generic_rv"
     atmosphere: Optional[Atmosphere] = None
     wind_model: Optional[Any] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -555,6 +556,7 @@ class FOBSScenario:
     deorbit_dv: float = 1.0
     vehicle: Any = None
     guidance: Any = None
+    geometry_key: str = "fobs_payload"
     use_j2: bool = True
     use_j3: bool = False
     use_j4: bool = False
@@ -787,6 +789,7 @@ class HGVScenario:
     adaptive: bool = False
     atmosphere: Optional[Atmosphere] = None
     wind_model: Optional[Any] = None
+    geometry_key: str = "avangard"
     metadata: Dict[str, Any] = field(default_factory=dict)
     _wind_cache_key: Any = field(default=None, repr=False, compare=False)
     _wind_cache_val: Any = field(default=None, repr=False, compare=False)
@@ -967,6 +970,7 @@ class SuppressedScenario:
     adaptive: bool = False
     atmosphere: Optional[Atmosphere] = None
     wind_model: Optional[Any] = None
+    geometry_key: str = "generic_rv"
     metadata: Dict[str, Any] = field(default_factory=dict)
     _wind_cache_key: Any = field(default=None, repr=False, compare=False)
     _wind_cache_val: Any = field(default=None, repr=False, compare=False)
@@ -1135,7 +1139,10 @@ class SwarmScenario:
     bus_v0: np.ndarray = field(default_factory=lambda: np.zeros(3))
     n_payloads: int = 3
     spread_deg: float = 2.0
+    bus_geometry_key: str = "swarm_bus"
+    payload_geometry_keys: List[str] = field(default_factory=lambda: ["generic_rv"])
     wind_model: Optional[Any] = None
+    geometry_key: str = "swarm_bus"
     metadata: Dict[str, Any] = field(default_factory=dict)
     _payloads: List = field(default_factory=list, repr=False)
 
@@ -1154,7 +1161,8 @@ class SwarmScenario:
                     np.cos(i * spread),
                     0.1 * np.sin(i * spread),
                 ]) * 10.0
-                payload = BallisticScenario(r0=self.bus_r0 + dr, v0=self.bus_v0 + dv)
+                geom_key = self.payload_geometry_keys[i % len(self.payload_geometry_keys)]
+                payload = BallisticScenario(r0=self.bus_r0 + dr, v0=self.bus_v0 + dv, geometry_key=geom_key)
                 payload.wind_model = self.wind_model
                 self._payloads.append(payload)
 
@@ -1233,6 +1241,7 @@ class DecoyThreatScenario:
     decoys: List[Any] = field(default_factory=list)
     release_t: float = 200.0
     wind_model: Optional[Any] = None
+    geometry_key: str = "generic_rv"
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -1306,6 +1315,7 @@ class CruiseMissileScenario:
     use_tides: bool = False
     max_degree: int = 10
     wind_model: Optional[Any] = None
+    geometry_key: str = "yj18"
     metadata: Dict[str, Any] = field(default_factory=dict)
     _cache: Any = field(default=None, repr=False)
     _wind_cache_key: Any = field(default=None, repr=False, compare=False)

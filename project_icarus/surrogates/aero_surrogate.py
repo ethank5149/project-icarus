@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import joblib
 from openmdao.api import ExplicitComponent
@@ -18,9 +19,18 @@ class AeroSurrogateComponent(ExplicitComponent):
 
     def initialize(self):
         self.options.declare("model_path", default="aero_surrogate.pkl")
+        self.options.declare("vehicle_key", default=None)
 
     def setup(self):
-        model_path = self.options["model_path"]
+        if self.options["vehicle_key"] is not None:
+            model_path = self.options["model_path"]
+            base = os.path.dirname(model_path) if os.path.dirname(model_path) else "."
+            vkey = self.options["vehicle_key"]
+            candidate = os.path.join(base, f"aero_surrogate_{vkey}.pkl")
+            if os.path.exists(candidate):
+                model_path = candidate
+        else:
+            model_path = self.options["model_path"]
         self.gpr = joblib.load(model_path)
 
         self.add_input("mach", val=2.0)

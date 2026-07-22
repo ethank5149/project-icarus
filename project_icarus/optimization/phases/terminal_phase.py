@@ -3,6 +3,7 @@ import openmdao.api as om
 from ...dynamics.eom_6dof import EOM6DOF
 from ...guidance.terminal_guidance import TerminalGuidance
 from ...aero.aero_analytical import blended_aero
+from ...surrogates.train_gpr import load_vehicle_gpr
 
 
 R_EARTH = 6371e3
@@ -13,6 +14,7 @@ class TerminalODE(om.ExplicitComponent):
         self.options.declare("num_nodes", default=1, types=int)
         self.options.declare("boundary_alt", default=100e3)
         self.options.declare("surrogate_path", default="aero_surrogate.pkl")
+        self.options.declare("geometry_key", default="generic")
         self.options.declare("kill_mechanism", default="hit_to_kill")
         self.options.declare("kill_radius", default=0.5)
 
@@ -43,6 +45,16 @@ class TerminalODE(om.ExplicitComponent):
             mechanism=self.options["kill_mechanism"],
             kill_radius=self.options["kill_radius"],
         )
+        self._surrogate_model = None
+        self._geometry_key = self.options["geometry_key"]
+
+    def _get_surrogate(self):
+        if self._surrogate_model is None:
+            try:
+                self._surrogate_model = load_vehicle_gpr(self._geometry_key)
+            except Exception:
+                pass
+        return self._surrogate_model
 
     def compute(self, inputs, outputs):
         nn = self.options["num_nodes"]
@@ -55,14 +67,25 @@ class TerminalODE(om.ExplicitComponent):
         target_r = inputs["target_r"]
         t = inputs["time"]
 
+        boundary_alt = self.options["boundary_alt"]
+        gpr = self._get_surrogate()
+
+        def surrogate(mach, alpha, beta, alt):
+            if gpr is not None:
+                X = np.array([[mach, alpha, beta, alt, 0.0]])
+                try:
+                    pred = gpr.predict(X, return_std=False)
+                    cd, cy, cm = float(pred[0, 0]), float(pred[0, 1]), float(pred[0, 2])
+                    return cd, cy, cm
+                except Exception:
+                    pass
+            cd, cy, cm, _, _ = blended_aero(
+                mach, alpha, beta, alt, boundary_alt=boundary_alt
+            )
+            return cd, cy, cm
+
         for i in range(nn):
             state = {"r": r[i], "v": v[i], "q": q[i], "omega": omega[i], "m": float(m[i])}
-
-            def surrogate(mach, alpha, beta, alt):
-                cd, cy, cm, _, _ = blended_aero(
-                    mach, alpha, beta, alt, boundary_alt=self.options["boundary_alt"]
-                )
-                return cd, cy, cm
 
             derivs = self.eom.compute(t[i], state, surrogate)
             outputs["dr_dt"][i] = derivs["r"]
@@ -97,6 +120,7 @@ class ClosedLoopTerminalODE(om.ExplicitComponent):
         self.options.declare("num_nodes", default=1, types=int)
         self.options.declare("boundary_alt", default=100e3)
         self.options.declare("surrogate_path", default="aero_surrogate.pkl")
+        self.options.declare("geometry_key", default="generic")
         self.options.declare("kill_mechanism", default="hit_to_kill")
         self.options.declare("kill_radius", default=0.5)
         # Closed-loop guidance law (pn | apn | zem | sdre_mpc).
@@ -135,6 +159,16 @@ class ClosedLoopTerminalODE(om.ExplicitComponent):
             kill_radius=self.options["kill_radius"],
             law=self.options["law"],
         )
+        self._surrogate_model = None
+        self._geometry_key = self.options["geometry_key"]
+
+    def _get_surrogate(self):
+        if self._surrogate_model is None:
+            try:
+                self._surrogate_model = load_vehicle_gpr(self._geometry_key)
+            except Exception:
+                pass
+        return self._surrogate_model
 
     def compute(self, inputs, outputs):
         nn = self.options["num_nodes"]
@@ -148,14 +182,25 @@ class ClosedLoopTerminalODE(om.ExplicitComponent):
         target_v = inputs["target_v"]
         t = inputs["time"]
 
+        boundary_alt = self.options["boundary_alt"]
+        gpr = self._get_surrogate()
+
+        def surrogate(mach, alpha, beta, alt):
+            if gpr is not None:
+                X = np.array([[mach, alpha, beta, alt, 0.0]])
+                try:
+                    pred = gpr.predict(X, return_std=False)
+                    cd, cy, cm = float(pred[0, 0]), float(pred[0, 1]), float(pred[0, 2])
+                    return cd, cy, cm
+                except Exception:
+                    pass
+            cd, cy, cm, _, _ = blended_aero(
+                mach, alpha, beta, alt, boundary_alt=boundary_alt
+            )
+            return cd, cy, cm
+
         for i in range(nn):
             state = {"r": r[i], "v": v[i], "q": q[i], "omega": omega[i], "m": float(m[i])}
-
-            def surrogate(mach, alpha, beta, alt):
-                cd, cy, cm, _, _ = blended_aero(
-                    mach, alpha, beta, alt, boundary_alt=self.options["boundary_alt"]
-                )
-                return cd, cy, cm
 
             # Closed-loop guidance: tune this node's gains from the parameters.
             self.guidance.N = float(inputs["N"][i])

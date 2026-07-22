@@ -43,6 +43,8 @@ def build_trajectory_problem(interceptor=None, guidance=None, closed_loop=True):
         from ..guidance.law import GuidanceLaw
         guidance = GuidanceLaw()
 
+    geometry_key = getattr(interceptor, "geometry_key", "generic")
+
     p = om.Problem()
     traj = dm.Trajectory()
     p.model.add_subsystem("traj", traj, promotes=["*"])
@@ -52,6 +54,7 @@ def build_trajectory_problem(interceptor=None, guidance=None, closed_loop=True):
     # --- Boost phase -------------------------------------------------------
     boost = dm.Phase(ode_class=BoostODE, transcription=tx)
     traj.add_phase("boost", boost)
+    boost.options["ode_init_kwargs"] = {"geometry_key": geometry_key}
     boost.set_time_options(fix_initial=True, duration_bounds=(20.0, 80.0), units="s")
     boost.add_state("r", rate_source="dr_dt", units="m", shape=(3,),
                     fix_initial=True, fix_final=False,
@@ -80,6 +83,7 @@ def build_trajectory_problem(interceptor=None, guidance=None, closed_loop=True):
     # --- Midcourse phase ---------------------------------------------------
     midcourse = dm.Phase(ode_class=MidcourseODE, transcription=tx)
     traj.add_phase("midcourse", midcourse)
+    midcourse.options["ode_init_kwargs"] = {"geometry_key": geometry_key}
     midcourse.set_time_options(fix_initial=False, duration_bounds=(60.0, 200.0), units="s")
     midcourse.add_state("r", rate_source="dr_dt", units="m", shape=(3,),
                         fix_initial=False, fix_final=False,
@@ -107,7 +111,7 @@ def build_trajectory_problem(interceptor=None, guidance=None, closed_loop=True):
     if closed_loop:
         terminal = dm.Phase(ode_class=ClosedLoopTerminalODE, transcription=tx)
         traj.add_phase("terminal", terminal)
-        terminal.options["ode_init_kwargs"] = {"law": law}
+        terminal.options["ode_init_kwargs"] = {"law": law, "geometry_key": geometry_key}
         terminal.set_time_options(fix_initial=False, duration_bounds=(10.0, 60.0), units="s")
         # Closed-loop: the final interceptor position is LEFT FREE so the
         # optimizer (tuning N / accel_limit + phase durations) can drive the
@@ -141,6 +145,7 @@ def build_trajectory_problem(interceptor=None, guidance=None, closed_loop=True):
     else:
         terminal = dm.Phase(ode_class=TerminalODE, transcription=tx)
         traj.add_phase("terminal", terminal)
+        terminal.options["ode_init_kwargs"] = {"geometry_key": geometry_key}
         terminal.set_time_options(fix_initial=False, duration_bounds=(10.0, 60.0), units="s")
         terminal.add_state("r", rate_source="dr_dt", units="m", shape=(3,),
                            fix_initial=False, fix_final=True,

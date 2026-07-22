@@ -12,6 +12,8 @@ class InterceptorConfig:
     mass: float = 1000.0
     area: float = 0.1
     ref_length: float = 1.0
+    geometry_key: str = "generic"
+    reference_area_override: float = 0.0
     inertia: np.ndarray = field(default_factory=lambda: np.diag([100.0, 200.0, 300.0]))
     kill_radius: float = 0.5
     kill_mechanism: str = "hit_to_kill"

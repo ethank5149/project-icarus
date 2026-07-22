@@ -377,3 +377,98 @@ def default_spec(vehicle: str, backend: str = "analytic", **overrides) -> SweepS
     base = dict(vehicle=vehicle, backend=backend)
     base.update(overrides)
     return SweepSpec(**base)
+
+
+def run_vehicle_sweep(
+    vehicle_key: str,
+    backend: str = "dolfinx",
+    mach_range: tuple = (0.3, 6.0, 12),
+    alpha_range: tuple = (-10.0, 20.0, 8),
+    beta_range: tuple = (-5.0, 5.0, 5),
+    altitude_range: tuple = (0.0, 150e3, 6),
+    delta_range: tuple = (0.0, 15.0, 4),
+    max_panels: int = 500_000,
+    progress: Optional[Callable[[int, int], None]] = None,
+) -> Dict:
+    """Run a structured (Mach, alpha, beta, alt, delta) sweep for one vehicle.
+
+    Parameters
+    ----------
+    vehicle_key : str
+        Key into ``VEHICLE_PRESETS`` in ``geometry.py``.
+    backend : str
+        CFD backend: ``"analytic"``, ``"scipy_interp"``, or ``"dolfinx"``.
+    max_panels : int
+        Cap on panel count for mesh-backed backends; if the vehicle exceeds
+        this, ``n_axial`` and ``n_circ`` are reduced automatically.
+
+    Returns
+    -------
+    Dict
+        Same structure as :func:`run_sweep` plus ``mesh_stats`` when the
+        backend builds a surface mesh.
+    """
+    geom = get_vehicle(vehicle_key)
+    n_axial, n_circ = 80, 48
+
+    mesh_stats = {}
+    if backend in ("dolfinx", "scipy_interp"):
+        v, f = build_surface_mesh(geom, n_axial=n_axial, n_circ=n_circ, backend="numpy")
+        n_panels = int(f.shape[0]) if f.size > 0 else 0
+        while n_panels > max_panels and n_axial > 12:
+            n_axial = max(12, n_axial // 2)
+            n_circ = max(12, n_circ // 2)
+            v, f = build_surface_mesh(geom, n_axial=n_axial, n_circ=n_circ, backend="numpy")
+            n_panels = int(f.shape[0]) if f.size > 0 else 0
+        try:
+            areas = 0.5 * np.linalg.norm(
+                np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]]), axis=1
+            )
+            angles = []
+            for tri in f:
+                pts = v[tri]
+                a = pts[1] - pts[0]
+                b = pts[2] - pts[0]
+                c = pts[2] - pts[1]
+                la, lb, lc = np.linalg.norm(a), np.linalg.norm(b), np.linalg.norm(c)
+                if la > 1e-12 and lb > 1e-12 and lc > 1e-12:
+                    ang = np.degrees(np.arccos(np.clip(np.dot(-a, b) / (la * lb), -1.0, 1.0)))
+                    angles.append(ang)
+            mesh_stats = {
+                "n_panels": int(n_panels),
+                "min_angle": float(np.min(angles)) if angles else 0.0,
+                "max_angle": float(np.max(angles)) if angles else 0.0,
+                "mean_angle": float(np.mean(angles)) if angles else 0.0,
+                "n_axial": int(n_axial),
+                "n_circ": int(n_circ),
+            }
+        except Exception:
+            mesh_stats = {"n_panels": int(n_panels)}
+
+    spec = SweepSpec(
+        vehicle=vehicle_key,
+        backend=backend,
+        mach_range=mach_range,
+        alpha_range=alpha_range,
+        beta_range=beta_range,
+        altitude_range=altitude_range,
+        delta_range=delta_range,
+    )
+    result = run_sweep(spec, progress=progress)
+    result["mesh_stats"] = mesh_stats
+    result.setdefault("sweep_metadata", {})
+    result["sweep_metadata"]["vehicle_key"] = vehicle_key
+    result["sweep_metadata"]["backend"] = backend
+    result["sweep_metadata"]["mesh_stats"] = mesh_stats
+    return result
+
+
+def vehicle_sweep_to_hdf5(
+    vehicle_key: str,
+    filename: str,
+    backend: str = "dolfinx",
+    **sweep_kwargs,
+) -> str:
+    """Run a per-vehicle sweep and save to HDF5."""
+    result = run_vehicle_sweep(vehicle_key, backend=backend, **sweep_kwargs)
+    return save_sweep_hdf5(result, filename)
