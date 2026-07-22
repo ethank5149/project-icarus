@@ -57,12 +57,25 @@ class TestAllVehiclePresets:
 
     def test_threat_keys_exist(self):
         for k in ("rs28_sarmat", "avangard", "kalibr_3m14", "kh101", "kh102",
-                  "zircon_3m22", "burevestnik", "cj10", "cj1000", "yj12", "yj18"):
+                  "zircon_3m22", "burevestnik", "cj10", "cj1000", "yj12", "yj18",
+                  "ss18_satan", "topol_m", "yars", "rs26_rubezh",
+                  "df5", "df31", "df41", "df17_dfzf", "jl2", "jl3",
+                  "df_zf_hgv", "kinzhal", "df100",
+                  "ur100n_ss19", "topol_ss25", "kh32", "oniks",
+                  "starriy_sky2", "ch_as_x"):
             assert k in VEHICLE_PRESETS
 
     def test_decoy_keys_exist(self):
-        for k in ("signature_balloon_decoy", "foam_decoy", "swarm_bus", "generic_rv"):
+        for k in ("signature_balloon_decoy", "foam_decoy", "swarm_bus", "generic_rv", "threat_rv"):
             assert k in VEHICLE_PRESETS
+
+    def test_report_vehicles_have_metadata(self):
+        for k in ("ss18_satan", "topol_m", "yars", "rs26_rubezh", "df5", "df31",
+                  "df41", "df17_dfzf", "jl2", "jl3", "df_zf_hgv", "kinzhal",
+                  "cj1000", "df100", "ur100n_ss19", "topol_ss25", "kh32",
+                  "oniks", "starriy_sky2", "ch_as_x"):
+            g = get_vehicle(k)
+            assert g.metadata, f"{k} missing metadata from threat report"
 
 
 class TestBodyProfile:

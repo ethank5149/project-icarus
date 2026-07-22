@@ -30,7 +30,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 import numpy as np
 
 from .aero_analytical import blended_aero
-from .geometry import VehicleGeometry, VEHICLE_PRESETS, get_vehicle
+from .geometry import VehicleGeometry, VEHICLE_PRESETS, get_vehicle, build_surface_mesh
 
 # Coefficient ordering used everywhere in this module.
 COEFF_NAMES = ["Cd", "Cy", "Cm", "Cn", "Cl_roll"]
@@ -138,7 +138,8 @@ def _scipy_interp_solve(geom: VehicleGeometry, mach, alpha, beta, alt, delta, sp
     s_area, ref_a, _ = reference_dimensions(geom)
     shape_factor = 1.0
     if ref_a > 1e-6:
-        verts, faces = build_surface_mesh(geom, backend="numpy")
+        mesh_backend = "stl" if (geom.stl_alias or geom.stl_path) else "numpy"
+        verts, faces = build_surface_mesh(geom, backend=mesh_backend)
         s = surface_area(verts, faces)
         shape_factor = float(np.clip(s / ref_a, 0.5, 4.0))
     interp = interp * np.array([0.6 + 0.4 * shape_factor, shape_factor, 1.0, 1.0, 1.0])
@@ -168,7 +169,8 @@ def _dolfinx_solve(geom: VehicleGeometry, mach, alpha, beta, alt, delta, spec: S
 
     from .geometry import build_surface_mesh, surface_area, reference_dimensions
 
-    verts, faces = build_surface_mesh(geom, backend="numpy")
+    mesh_backend = "stl" if (geom.stl_alias or geom.stl_path) else "numpy"
+    verts, faces = build_surface_mesh(geom, backend=mesh_backend)
     if len(faces) == 0:
         return _analytic_point(mach, alpha, beta, alt, delta, spec)
 
@@ -413,12 +415,13 @@ def run_vehicle_sweep(
 
     mesh_stats = {}
     if backend in ("dolfinx", "scipy_interp"):
-        v, f = build_surface_mesh(geom, n_axial=n_axial, n_circ=n_circ, backend="numpy")
+        mesh_backend = "stl" if (geom.stl_alias or geom.stl_path) else "numpy"
+        v, f = build_surface_mesh(geom, n_axial=n_axial, n_circ=n_circ, backend=mesh_backend)
         n_panels = int(f.shape[0]) if f.size > 0 else 0
         while n_panels > max_panels and n_axial > 12:
             n_axial = max(12, n_axial // 2)
             n_circ = max(12, n_circ // 2)
-            v, f = build_surface_mesh(geom, n_axial=n_axial, n_circ=n_circ, backend="numpy")
+            v, f = build_surface_mesh(geom, n_axial=n_axial, n_circ=n_circ, backend=mesh_backend)
             n_panels = int(f.shape[0]) if f.size > 0 else 0
         try:
             areas = 0.5 * np.linalg.norm(
