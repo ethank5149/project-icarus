@@ -55,24 +55,33 @@ class SarmatBoostODE(om.ExplicitComponent):
         self.add_output("dq_dt", val=np.zeros((nn, 4)))
         self.add_output("domega_dt", val=np.zeros((nn, 3)))
         self.add_output("dm_dt", val=np.zeros(nn))
+        self.add_output("miss_distance", val=np.zeros(nn))
 
         # 6-DOF EOM (no thrust model — we add thrust externally)
-        self.eom = EOM6DOF(boundary_alt=self.options["boundary_alt"])
+        # use_cython=False ensures OpenMDAO complex-step derivatives work
+        self.eom = EOM6DOF(boundary_alt=self.options["boundary_alt"], use_cython=False)
 
-        # RS-28 Sarmat multi-stage thrust model
+        # RS-28 Sarmat multi-stage thrust model (authoritative source data):
+        # - Stage 1: PDU-99 derived from RD-274 (~4,952 kN, 90s burn)
+        # - Stage 2: RD-250 class (~1,200 kN, 180s burn)
+        # - Stage 3: Four RS-99 engines, "over 100 tons thrust" (~1,000+ kN, 90s burn)
+        # Refs: Astronautica RD-274 (4,952 kN), Missile Defense Advocacy (PDU-99),
+        #       Army Recognition ("four engines ... over 100 tons thrust")
         self._thrust_model = MultiStageThrustModel([
-            StageSpec(thrust=lambda t: 4.6e6, burn_time=100.0,
-                      wet_mass=180000.0, dry_mass=80000.0, Isp=320.0),
-            StageSpec(thrust=lambda t: 850e3, burn_time=150.0,
-                      wet_mass=80000.0, dry_mass=20000.0, Isp=320.0),
-            StageSpec(thrust=lambda t: 20e3, burn_time=60.0,
-                      wet_mass=20000.0, dry_mass=18000.0, Isp=300.0),
+            StageSpec(thrust=lambda t: 5.0e6, burn_time=90.0,
+                      wet_mass=140000.0, dry_mass=11340.0, Isp=315.0),
+            StageSpec(thrust=lambda t: 1.2e6, burn_time=180.0,
+                      wet_mass=48000.0, dry_mass=3600.0, Isp=325.0),
+            StageSpec(thrust=lambda t: 1.0e6, burn_time=90.0,
+                      wet_mass=10100.0, dry_mass=2160.0, Isp=330.0),
         ])
 
         self._surrogate_model = None
         self._geometry_key = self.options["geometry_key"]
         self._target_lat = self.options["target_lat"]
         self._target_lon = self.options["target_lon"]
+
+        self.declare_partials('*', '*', method='fd')
 
     def _get_surrogate(self):
         if self._surrogate_model is None:
@@ -165,3 +174,4 @@ class SarmatBoostODE(om.ExplicitComponent):
             outputs["dq_dt"][i] = derivs["q"]
             outputs["domega_dt"][i] = derivs["omega"]
             outputs["dm_dt"][i] = dm_dt
+            outputs["miss_distance"][i] = np.linalg.norm(r[i] - target_r)

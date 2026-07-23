@@ -1,19 +1,15 @@
 """Dymos-based RS-28 Sarmat offensive trajectory optimization.
 
-Assembles a three-phase Radau transcription problem (boost, midcourse,
-terminal) that minimizes the terminal miss distance from Kozelsk to the
-defended DC aim point.  The optimizer tunes the staged elevation schedule
-(``el_0``, ``el_1``, ``t_cross``) and stage-3 thrust scale (``T3_scale``)
-exposed as Dymos parameters on the boost phase.
+Single-phase boost optimization that minimizes terminal miss distance.
+The optimizer tunes the staged elevation schedule and stage-3 thrust scale
+to hit the DC target.  The resulting optimal thrust-direction profile is
+saved as a precomputed trajectory table for the guidance computer.
 """
 
 import numpy as np
 import openmdao.api as om
 import dymos as dm
 from .phases.sarmat_boost_phase import SarmatBoostODE
-from .phases.sarmat_midcourse_phase import SarmatMidcourseODE
-from .phases.sarmat_terminal_phase import SarmatTerminalODE
-
 
 # Kozelsk launch site (ECEF, surface elevation ~175 m)
 _KOZELSK_LAT = 54.07
@@ -34,7 +30,12 @@ R_TARGET_DC = _geodetic_to_ecef_simple(_DC_LAT, _DC_LON, _DC_ELEV)
 
 
 def build_sarmat_trajectory_problem(num_segments=20, order=5, maxiter=200):
-    """Assemble the Sarmat 3-phase Dymos trajectory optimization problem.
+    """Assemble the Sarmat boost-phase Dymos trajectory optimization problem.
+
+    This is a single-phase problem that optimizes the boost trajectory to
+    minimize the miss distance at burnout.  The optimizer tunes the staged
+    elevation schedule (``el_0``, ``el_1``, ``t_cross``) and stage-3 thrust
+    scale (``T3_scale``) exposed as Dymos parameters.
 
     Parameters
     ----------
@@ -93,62 +94,9 @@ def build_sarmat_trajectory_problem(num_segments=20, order=5, maxiter=200):
                         val=R_TARGET_DC, opt=False)
 
     # ------------------------------------------------------------------
-    # Phase 2: Midcourse (ballistic coast, no thrust)
-    # ------------------------------------------------------------------
-    midcourse = dm.Phase(ode_class=SarmatMidcourseODE, transcription=tx)
-    traj.add_phase("midcourse", midcourse)
-    midcourse.options["ode_init_kwargs"] = {"geometry_key": "rs28_sarmat"}
-    midcourse.set_time_options(fix_initial=False,
-                                duration_bounds=(600.0, 1800.0), units="s")
-
-    midcourse.add_state("r", rate_source="dr_dt", units="m", shape=(3,),
-                        fix_initial=False, val=np.array([0.0, 200e3, 6471e3]))
-    midcourse.add_state("v", rate_source="dv_dt", units="m/s", shape=(3,),
-                        fix_initial=False, val=np.array([0.0, 3000.0, 1000.0]))
-    midcourse.add_state("q", rate_source="dq_dt", units=None, shape=(4,),
-                        fix_initial=False, val=np.array([1.0, 0.0, 0.0, 0.0]))
-    midcourse.add_state("omega", rate_source="domega_dt", units="rad/s", shape=(3,),
-                        fix_initial=False, val=np.zeros(3))
-    midcourse.add_state("m", rate_source="dm_dt", units="kg",
-                        fix_initial=False, val=20000.0)
-
-    # ------------------------------------------------------------------
-    # Phase 3: Terminal (reentry to ground impact)
-    # ------------------------------------------------------------------
-    terminal = dm.Phase(ode_class=SarmatTerminalODE, transcription=tx)
-    traj.add_phase("terminal", terminal)
-    terminal.options["ode_init_kwargs"] = {"geometry_key": "threat_rv"}
-    terminal.set_time_options(fix_initial=False,
-                              duration_bounds=(300.0, 900.0), units="s")
-
-    terminal.add_state("r", rate_source="dr_dt", units="m", shape=(3,),
-                       fix_initial=False, val=np.array([100e3, 0.0, 6471e3]))
-    terminal.add_state("v", rate_source="dv_dt", units="m/s", shape=(3,),
-                       fix_initial=False, val=np.array([-1500.0, 0.0, -500.0]))
-    terminal.add_state("q", rate_source="dq_dt", units=None, shape=(4,),
-                       fix_initial=False, val=np.array([1.0, 0.0, 0.0, 0.0]))
-    terminal.add_state("omega", rate_source="domega_dt", units="rad/s", shape=(3,),
-                       fix_initial=False, val=np.zeros(3))
-    terminal.add_state("m", rate_source="dm_dt", units="kg",
-                       fix_initial=False, val=800.0)
-
-    terminal.add_parameter("target_r", units="m", shape=(3,),
-                           val=R_TARGET_DC, opt=False)
-
-    terminal.add_timeseries_output("miss_distance")
-
-    # ------------------------------------------------------------------
-    # Link phases by state continuity
-    # ------------------------------------------------------------------
-    traj.link_phases(phases=["boost", "midcourse"],
-                     vars=["r", "v", "q", "omega", "m", "time"])
-    traj.link_phases(phases=["midcourse", "terminal"],
-                     vars=["r", "v", "q", "omega", "m", "time"])
-
-    # ------------------------------------------------------------------
     # Objective: minimize final miss distance
     # ------------------------------------------------------------------
-    terminal.add_objective("miss_distance", scaler=1.0, loc="final")
+    boost.add_objective("miss_distance", scaler=1.0, loc="final")
 
     p.driver = om.ScipyOptimizeDriver(optimizer="SLSQP")
     p.driver.declare_coloring()
@@ -156,10 +104,13 @@ def build_sarmat_trajectory_problem(num_segments=20, order=5, maxiter=200):
 
     p.setup()
 
-    # Feasible initial guesses for phase durations (midpoints of bounds)
+    # Feasible initial guesses
     p.set_val("traj.boost.t_duration", 300.0)
-    p.set_val("traj.midcourse.t_duration", 1200.0)
-    p.set_val("traj.terminal.t_duration", 600.0)
+    p.set_val("traj.boost.parameters:el_0", np.radians(45.0))
+    p.set_val("traj.boost.parameters:el_1", np.radians(25.0))
+    p.set_val("traj.boost.parameters:t_cross", 100.0)
+    p.set_val("traj.boost.parameters:T3_scale", 1.0)
+    p.set_val("traj.boost.parameters:target_r", R_TARGET_DC)
 
     return p
 

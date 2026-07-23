@@ -10,6 +10,7 @@ reference/GMTED2010/
 reference/ERA5/
 reference/models/
 reference/vehicles/
+reference/trajectory_profiles/
 
 docs/*.md
 

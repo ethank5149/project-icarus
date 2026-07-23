@@ -1512,7 +1512,7 @@ class SarmatScenario(FOBSScenario):
     target_type: str = "sarmat"
     geometry_key: str = "rs28_sarmat"
     boost_profile: str = "shortened"  # "standard" | "shortened" | "mortar"
-    boost_duration_s: float = 80.0
+    boost_duration_s: float = 342.0
     thrust_profile: Optional[List[Tuple[float, float]]] = None
     mortar_pop_height_m: float = 20.0
     ir_signature_scale: float = 0.3
@@ -1534,12 +1534,21 @@ class SarmatScenario(FOBSScenario):
     area: float = 7.07
     mass: float = 208100.0
 
-    # Explicit RS-28 stage data (OSINT-approx, self-consistent)
-    # Sources: R-36M2 numbers scaled to RS-28 208.1 t launch mass
+    # DC defended target (actual aim point for Sarmat)
+    _TARGET_LAT: float = 38.90
+    _TARGET_LON: float = -77.04
+    _TARGET_ALT: float = 31.0
+
+    # RS-28 Sarmat stage breakdown from authoritative sources:
+    # - Stage 1: PDU-99 derived from RD-274 (~4,952 kN)
+    # - Stage 2: RD-250 class main + verniers (~1,200 kN estimated)
+    # - Stage 3: Four RS-99 engines, "over 100 tons thrust" (~1,000+ kN)
+    # Refs: Astronautica RD-274 (4,952 kN), Missile Defense Advocacy (PDU-99),
+    #       Army Recognition ("four engines ... over 100 tons thrust")
     _SARMAT_STAGES = [
-        {"t_start": 0.0,  "t_end": 100.0, "thrust": 4.6e6,  "m_dot": 1500.0},
-        {"t_start": 100.0, "t_end": 250.0, "thrust": 850e3,  "m_dot": 260.0},
-        {"t_start": 250.0, "t_end": 310.0, "thrust": 20e3,   "m_dot": 6.6},
+        {"t_start": 0.0,   "t_end": 90.0,  "thrust": 5.0e6,   "m_dot": 1430.0},
+        {"t_start": 90.0,  "t_end": 270.0, "thrust": 1.2e6,   "m_dot": 247.0},
+        {"t_start": 270.0, "t_end": 360.0, "thrust": 1.0e6,   "m_dot": 88.0},
     ]
 
     def __post_init__(self):
@@ -1558,24 +1567,31 @@ class SarmatScenario(FOBSScenario):
         if self.initial_thrust_dir is not None:
             self._initial_thrust_dir = self.initial_thrust_dir / np.linalg.norm(self.initial_thrust_dir)
         
-        # Override aim point to actual defended target hemisphere
-        if hasattr(self, '_aim_point') and hasattr(self, 'r0'):
-            lat0, lon0, _ = _ecef_to_geodetic(self.r0)
-            phi1 = np.radians(lat0)
-            phi2 = np.radians(38.90)
-            dlam = np.radians(-77.04 - lon0)
-            cos_d = np.sin(phi1) * np.sin(phi2) + np.cos(phi1) * np.cos(phi2) * np.cos(dlam)
-            cos_d = np.clip(cos_d, -1.0, 1.0)
-            dist_km = np.arccos(cos_d) * (R_EARTH / 1000.0)
-            az = np.degrees(np.arctan2(
-                np.cos(phi2) * np.sin(dlam),
-                np.cos(phi1) * np.sin(phi2) - np.sin(phi1) * np.cos(phi2) * np.cos(dlam)
-            )) % 360.0
-            aim_lat, aim_lon = _destination_point(lat0, lon0, az, np.degrees(np.arccos(cos_d) * 0.5))
-            self._aim_point = _geodetic_to_ecef_simple(aim_lat, aim_lon, 0.0)
-
+        # Override aim point to exact defended target coordinates
+        if hasattr(self, 'r0'):
+            self._aim_point = _geodetic_to_ecef_simple(
+                self._TARGET_LAT, self._TARGET_LON, self._TARGET_ALT
+            )
+        
         self._era5_loaded = False
         self._era5_interpolator = None
+
+    def _init_icbm_guidance(self):
+        from ..guidance.precomputed_trajectory import SarmatTrajectoryLibrary
+
+        self._target_ecef = _geodetic_to_ecef_simple(
+            self._TARGET_LAT, self._TARGET_LON, self._TARGET_ALT
+        )
+
+        library = SarmatTrajectoryLibrary(launch_ecef=self.r0)
+        self._profile = library.get_or_compute(
+            target_ecef=self._target_ecef,
+            profile_name="standard",
+            stages=self._SARMAT_STAGES,
+            mass_initial=self._initial_mass(),
+            cd=self.cd,
+            area=self.area,
+        )
 
     def _ensure_era5(self):
         if not self._era5_loaded and self.wind_model is None:
@@ -1618,64 +1634,9 @@ class SarmatScenario(FOBSScenario):
         return 208100.0
 
     def _current_thrust_dir(self, t, r, v):
-        """Onboard guidance thrust direction from pre-launch computed profile.
-
-        Real ICBM guidance:
-        1. Pre-launch: compute required elevation from range tables/great-circle
-        2. t < 2.0s: vertical ascent to clear silo
-        3. 2.0s <= t < 10.0s: pitch over to target azimuth at commanded elevation
-        4. t >= 10.0s: gravity turn (thrust aligned with velocity, zero angle of attack)
-
-        The commanded elevation is based on the great-circle distance to target
-        and the vehicle's ballistic coefficient. No position-error proportional
-        navigation because that produces unrealistic trajectories.
-        """
-        to_target = self._aim_point - r
-        to_target_dir = to_target / max(np.linalg.norm(to_target), 1e-9)
-
-        lat, lon, _ = _ecef_to_geodetic(r)
-        east, north, up = _enu_basis(lat, lon)
-
-        gc_horiz = to_target_dir - np.dot(to_target_dir, up) * up
-        gc_horiz_norm = np.linalg.norm(gc_horiz)
-        if gc_horiz_norm > 1e-6:
-            gc_horiz = gc_horiz / gc_horiz_norm
-        else:
-            gc_horiz = np.array([0.0, 0.0, 0.0])
-
-        target_azimuth = np.degrees(np.arctan2(
-            np.dot(gc_horiz, east),
-            np.dot(gc_horiz, north)
-        )) % 360.0
-
-        range_m = np.linalg.norm(to_target)
-        desired_elev = 15.0 + 45.0 * np.clip(range_m / 20_000_000.0, 0.0, 1.0)
-        desired_elev = np.clip(desired_elev, 15.0, 75.0)
-
-        if t < 5.0:
-            return up
-        elif t < 30.0:
-            frac = (t - 5.0) / 25.0
-            hoz = np.cos(np.radians(desired_elev)) * gc_horiz + np.sin(np.radians(desired_elev)) * up
-            hoz = hoz / max(np.linalg.norm(hoz), 1e-9)
-            desired = (1.0 - frac) * up + frac * hoz
-            return desired / max(np.linalg.norm(desired), 1e-9)
-        else:
-            vmag = np.linalg.norm(v)
-            if vmag > 1e-6:
-                v_dir = v / vmag
-                v_horiz = v_dir - np.dot(v_dir, up) * up
-                v_horiz_norm = np.linalg.norm(v_horiz)
-                if v_horiz_norm > 1e-6:
-                    v_horiz = v_horiz / v_horiz_norm
-                    elev = np.arcsin(np.clip(np.dot(v_dir, up), -1.0, 1.0))
-                    max_elev = np.radians(55.0)
-                    if elev > max_elev:
-                        v_dir = np.cos(max_elev) * v_horiz + np.sin(max_elev) * up
-                        v_dir = v_dir / np.linalg.norm(v_dir)
-                return v_dir
-            else:
-                return np.cos(np.radians(desired_elev)) * gc_horiz + np.sin(np.radians(desired_elev)) * up
+        if not hasattr(self, '_profile'):
+            self._init_icbm_guidance()
+        return self._profile.thrust_direction(t, r, v)
 
     def _boost_guidance_correction(self, t, r, v):
         """Deprecated: guidance now applied directly via _current_thrust_dir."""

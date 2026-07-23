@@ -219,11 +219,11 @@ class EOM6DOF:
             domega_dt = self.inertia_inv @ (m_total_body - np.cross(omega, self.inertia @ omega))
             dm_dt = mass_dot
             return {
-                "r": dr_dt,
-                "v": dv_dt,
-                "q": dq_dt,
-                "omega": domega_dt,
-                "m": dm_dt,
+                "r": np.asarray(dr_dt, dtype=float),
+                "v": np.asarray(dv_dt, dtype=float),
+                "q": np.asarray(dq_dt, dtype=float),
+                "omega": np.asarray(domega_dt, dtype=float),
+                "m": float(dm_dt),
             }
         else:
             q = quat_normalize(q)
@@ -292,11 +292,11 @@ class EOM6DOF:
             dm_dt = mass_dot
 
             return {
-                "r": dr_dt,
-                "v": dv_dt,
-                "q": dq_dt,
-                "omega": domega_dt,
-                "m": dm_dt,
+                "r": np.asarray(dr_dt, dtype=float),
+                "v": np.asarray(dv_dt, dtype=float),
+                "q": np.asarray(dq_dt, dtype=float),
+                "omega": np.asarray(domega_dt, dtype=float),
+                "m": float(dm_dt),
             }
 
     def _analytic_cn_cl_roll(self, mach, alpha, beta, alt):
