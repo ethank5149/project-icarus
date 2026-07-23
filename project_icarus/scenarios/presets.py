@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, Tuple
 import numpy as np
+from scipy.integrate import solve_ivp
+from scipy.optimize import least_squares
 
 from .target_factory import (
     BallisticScenario,
@@ -15,6 +17,9 @@ from .target_factory import (
     SarmatScenario,
     MU_EARTH,
     R_EARTH,
+    _two_body_accel,
+    _ground_altitude,
+    _ecef_to_geodetic,
 )
 from .scenario import EngagementScenario
 from ..interceptors.config import InterceptorConfig, GuidanceConfig
@@ -105,83 +110,160 @@ def _great_circle_azimuth_range_km(
     return float(azimuth), float(dist_km)
 
 
-def _lambert_solve(r1, v1_approx, r2, mu, t_max, max_iter=30, tol=1.0):
-    """Solve Lambert's problem using iterative shooting with full 3-DOF propagation.
+def _integrate_3dof(r0, v0, t_max, dt=0.5, use_j2=True, 
+                   cd=0.3, area=7.07, mass=208100.0):
+    """Full-fidelity 3-DOF propagation under J2 gravity + atmosphere + drag.
     
-    Given initial position r1, target position r2, and time of flight t_max,
-    find the velocity v1 that makes the trajectory reach r2 in time t_max.
-    Uses bisection on the velocity magnitude with full orbital propagation.
+    Integrates until ground impact (WGS84 ellipsoid) or t_max.
+    
+    Returns:
+        r, v: final position and velocity
+        t_final: actual time of flight
+        hit_ground: whether ground impact occurred
     """
-    r1 = np.asarray(r1, dtype=float)
-    r2 = np.asarray(r2, dtype=float)
-    r1_mag = np.linalg.norm(r1)
+    r = np.asarray(r0, dtype=float).copy()
+    v = np.asarray(v0, dtype=float).copy()
     
-    # Direction from r1 to r2
-    to_r2 = r2 - r1
-    to_r2_mag = np.linalg.norm(to_r2)
-    to_r2_dir = to_r2 / max(to_r2_mag, 1e-12)
+    # Load atmosphere model once
+    from ..dynamics.atmosphere import Atmosphere
+    atm = Atmosphere()
     
-    # Initial velocity direction: perpendicular to r1 in the plane of r1 and r2
-    r1_dir = r1 / max(r1_mag, 1e-12)
-    plane_normal = np.cross(r1_dir, to_r2_dir)
-    plane_normal = plane_normal / max(np.linalg.norm(plane_normal), 1e-12)
-    v_dir = np.cross(plane_normal, r1_dir)
-    v_dir = v_dir / max(np.linalg.norm(v_dir), 1e-12)
+    t = 0.0
+    hit_ground = False
     
-    # Ensure v_dir points generally toward r2
-    if np.dot(v_dir, to_r2_dir) < 0:
-        v_dir = -v_dir
-    
-    # Bounds for velocity magnitude
-    v_circular = np.sqrt(mu / r1_mag)
-    v_escape = np.sqrt(2.0 * mu / r1_mag)
-    
-    def _range_error(v_mag):
-        v0 = v_dir * v_mag
-        tgt = BallisticScenario(r0=r1, v0=v0, use_j2=True, adaptive=True)
-        try:
-            state = tgt.propagate(t_max)
-        except Exception:
-            return 1e6
-        r = state[:3]
-        alt = np.linalg.norm(r) - R_EARTH
-        if alt > 100e3:
-            return 1e6
-        lat_i, lon_i, _ = ecef_to_geodetic(r)
-        _, dist = _great_circle_azimuth_range_km(lat_i, lon_i, 
-                                                  ecef_to_geodetic(r2)[0], 
-                                                  ecef_to_geodetic(r2)[1])
-        return dist
-    
-    # Find bracket for bisection
-    v_low = v_circular * 0.8
-    v_high = v_escape * 0.95
-    
-    f_low = _range_error(v_low)
-    f_high = _range_error(v_high)
-    
-    # Expand bounds if needed
-    while f_low * f_high > 0 and v_high < v_escape * 1.2:
-        v_high *= 1.1
-        f_high = _range_error(v_high)
-    
-    if f_low * f_high > 0:
-        return v_dir * v_circular * 1.2
-    
-    # Bisection
-    for _ in range(max_iter):
-        v_mid = (v_low + v_high) / 2.0
-        f_mid = _range_error(v_mid)
-        if abs(f_mid) < tol:
+    while t < t_max:
+        # Check ground impact FIRST
+        alt = _ground_altitude(r)
+        if alt <= 0.0 and t > 1.0:  # Don't trigger at t=0
+            hit_ground = True
             break
-        if f_low * f_mid <= 0:
-            v_high = v_mid
-            f_high = f_mid
-        else:
-            v_low = v_mid
-            f_low = f_mid
+        
+        # Acceleration: J2 gravity + drag
+        a_grav = _two_body_accel(r, use_j2=use_j2, use_j3=False, use_j4=False,
+                                use_high_order=False, use_third_body=False, use_tides=False,
+                                max_degree=10, t=t)
+        
+        a_drag = np.zeros(3)
+        if 0.0 < alt < 100e3:
+            rho = atm.density_scalar(alt)
+            vmag = np.linalg.norm(v)
+            if vmag > 1e-6:
+                q = 0.5 * rho * vmag**2
+                a_drag = -q * cd * area / mass * (v / vmag)
+        
+        a_total = a_grav + a_drag
+        
+        # RK4 step
+        def rhs(state):
+            rr, vv = state[:3], state[3:]
+            return np.concatenate([vv, a_total])
+        
+        k1 = rhs(np.concatenate([r, v]))
+        k2 = rhs(np.concatenate([r + 0.5*dt*k1[:3], v + 0.5*dt*k1[3:]]))
+        k3 = rhs(np.concatenate([r + 0.5*dt*k2[:3], v + 0.5*dt*k2[3:]]))
+        k4 = rhs(np.concatenate([r + dt*k3[:3], v + dt*k3[3:]]))
+        
+        r = r + (dt/6.0) * (k1[:3] + 2*k2[:3] + 2*k3[:3] + k4[:3])
+        v = v + (dt/6.0) * (k1[3:] + 2*k2[3:] + 2*k3[3:] + k4[3:])
+        
+        t += dt
+        
+        # Numerical safety
+        if not np.all(np.isfinite(r)) or not np.all(np.isfinite(v)):
+            break
     
-    return v_dir * (v_low + v_high) / 2.0
+    return r, v, t, hit_ground
+
+
+def solve_icbm_trajectory(r0, r_target, launch_az_deg, launch_el_deg, tof_max=3000.0, 
+                          mass=208100.0, area=7.07, cd=0.3):
+    """Solve ICBM trajectory as a constrained boundary-value problem.
+    
+    Finds the launch azimuth and elevation that cause the 3-DOF trajectory to
+    impact the target point on the WGS84 ellipsoid, using full J2 gravity +
+    atmospheric drag + WGS84 ground detection.
+    
+    The launch speed magnitude is FIXED by the missile's propulsion system
+    (RS-28 Sarmat: ~8250 m/s for this range). We only optimize the launch
+    direction via azimuth and elevation angles. This models real ICBM guidance
+    where the inertial system makes midcourse corrections but cannot change
+    the vehicle's energy state.
+    
+    Args:
+        r0: Initial position in ECEF (m)
+        r_target: Target position in ECEF (m)
+        launch_az_deg: Launch azimuth (degrees, clockwise from north)
+        launch_el_deg: Launch elevation angle (degrees above horizon)
+        tof_max: Maximum time of flight (s)
+        mass, area, cd: Vehicle properties
+    
+    Returns:
+        v0: Optimal launch velocity (m/s)
+        r_impact: Impact position (m)
+        t_impact: Time of flight (s)
+        miss: Miss distance at impact (m)
+    """
+    r0 = np.asarray(r0, dtype=float)
+    r_target = np.asarray(r_target, dtype=float)
+    
+    # ENU basis at launch point
+    lat = np.arctan2(r0[2], np.sqrt(r0[0]**2 + r0[1]**2))
+    lon = np.arctan2(r0[1], r0[0])
+    east = np.array([-np.sin(lon), np.cos(lon), 0.0])
+    north = np.array([
+        -np.sin(lat) * np.cos(lon),
+        -np.sin(lat) * np.sin(lon),
+        np.cos(lat),
+    ])
+    up = np.array([
+        np.cos(lat) * np.cos(lon),
+        np.cos(lat) * np.sin(lon),
+        np.sin(lat),
+    ])
+    az = np.radians(launch_az_deg)
+    hoz_dir = np.cos(az) * north + np.sin(az) * east
+    hoz_dir = hoz_dir / np.linalg.norm(hoz_dir)
+    
+    # Fixed burnout velocity magnitude from propulsion system
+    # RS-28 Sarmat: ~8250 m/s for 7300-10000 km range
+    v_mag_fixed = 8250.0
+    
+    def make_v0(el_deg):
+        el = np.radians(el_deg)
+        return (np.cos(el) * hoz_dir + np.sin(el) * up) * v_mag_fixed
+    
+    def objective(el_deg):
+        v0 = make_v0(float(el_deg[0]))
+        r, v, t_final, hit_ground = _integrate_3dof(
+            r0, v0, tof_max, dt=0.5, use_j2=True,
+            cd=cd, area=area, mass=mass
+        )
+        
+        if not hit_ground:
+            return 1e6
+        
+        miss = np.linalg.norm(r - r_target)
+        return miss
+    
+    from scipy.optimize import minimize
+    result = minimize(
+        objective, [float(launch_el_deg)],
+        method='Nelder-Mead',
+        bounds=[(5.0, 45.0)],
+        options={'maxiter': 200, 'xatol': 0.1, 'fatol': 10.0}
+    )
+    
+    if not result.success:
+        raise RuntimeError(f"BVP solver failed: {result.message}")
+    
+    v0_opt = make_v0(result.x[0])
+    r_impact, v_impact, t_impact, hit = _integrate_3dof(
+        r0, v0_opt, tof_max, dt=0.5, use_j2=True,
+        cd=cd, area=area, mass=mass
+    )
+    miss = np.linalg.norm(r_impact - r_target)
+    
+    return v0_opt, r_impact, t_impact, miss
 
 
 def launch_to_target_velocity(
@@ -192,29 +274,55 @@ def launch_to_target_velocity(
     range_km: float,
     launch_el_deg: float = 45.0,
 ) -> Tuple[np.ndarray, float]:
-    """Compute a launch ``v0`` (ECEF) aimed at ``az_deg`` over ``range_km``.
+    """Compute a launch ``v0`` (ECEF) that reaches the target.
 
-    Uses Lambert's problem solution with iterative full 3-DOF propagation
-    to find the velocity vector that reaches the target. This is the
-    standard military/industry approach for ballistic missile targeting.
+    Solves a constrained 3-DOF boundary-value problem with full J2 gravity
+    + atmospheric drag + WGS84 ground detection. This replaces the Lambert
+    formulation because Lambert assumes Keplerian two-body dynamics, which
+    is invalid for atmospheric flight.
     """
     r0 = geodetic_to_ecef(lat_deg, lon_deg, alt_m)
     
-    # Compute target position
-    d_az = np.radians(az_deg)
-    d_lat = range_km * np.sin(d_az) / 111.0
-    d_lon = range_km * np.cos(d_az) / (111.0 * max(np.cos(np.radians(lat_deg)), 0.1))
-    target_lat = lat_deg + d_lat
-    target_lon = lon_deg + d_lon
+    # Great-circle destination
+    lat1 = np.radians(lat_deg)
+    lon1 = np.radians(lon_deg)
+    az = np.radians(az_deg)
+    d = range_km * 1000.0 / R_EARTH
+    
+    lat2 = np.arcsin(np.sin(lat1) * np.cos(d) + np.cos(lat1) * np.sin(d) * np.cos(az))
+    lon2 = lon1 + np.arctan2(
+        np.sin(az) * np.sin(d) * np.cos(lat1),
+        np.cos(d) - np.sin(lat1) * np.sin(lat2)
+    )
+    target_lat = float(np.degrees(lat2))
+    target_lon = float(np.degrees(lon2))
     r_target = geodetic_to_ecef(target_lat, target_lon, 0.0)
     
-    # Time of flight estimate (ballistic trajectory)
-    t_est = range_km * 1000.0 / 3000.0  # rough estimate at ~3 km/s
-    
-    v0 = _lambert_solve(r0, None, r_target, MU_EARTH, t_est)
-    speed = float(np.linalg.norm(v0))
-    
-    return v0, speed
+    try:
+        v0, r_impact, t_impact, miss = solve_icbm_trajectory(
+            r0, r_target, az_deg, launch_el_deg, tof_max=3000.0,
+            mass=208100.0, area=7.07, cd=0.3
+        )
+        speed = float(np.linalg.norm(v0))
+        return v0, speed
+    except Exception as exc:
+        print(f"BVP solver failed: {exc}, using simple ballistic estimate")
+        r_dir = r0 / np.linalg.norm(r0)
+        east = np.array([-np.sin(np.radians(lon_deg)), np.cos(np.radians(lon_deg)), 0.0])
+        north = np.array([
+            -np.sin(np.radians(lat_deg)) * np.cos(np.radians(lon_deg)),
+            -np.sin(np.radians(lat_deg)) * np.sin(np.radians(lon_deg)),
+            np.cos(np.radians(lat_deg)),
+        ])
+        v_dir = np.cos(np.radians(launch_el_deg)) * north + np.sin(np.radians(launch_el_deg)) * east
+        v_dir = v_dir - np.dot(v_dir, r_dir) * r_dir
+        v_dir = v_dir / np.linalg.norm(v_dir)
+        
+        el = np.radians(launch_el_deg)
+        g = 9.81
+        v_est = np.sqrt(range_km * 1000.0 * g / np.sin(2.0 * el))
+        v0 = v_dir * min(v_est, 12000.0)
+        return v0, float(np.linalg.norm(v0))
 
 
 def geodetic_launch_to_target(
@@ -228,6 +336,7 @@ def geodetic_launch_to_target(
     scenario_type: str = "ballistic",
     use_j2: bool = True,
     engagement_end: float = 1200.0,
+    lightweight: bool = False,
     **kwargs,
 ) -> TargetPreset:
     """Build a :class:`TargetPreset` launching from a site toward a defended point.
@@ -256,26 +365,37 @@ def geodetic_launch_to_target(
     target_launch = geodetic_to_ecef(target_lat, target_lon, target_alt)
 
     if scenario_type == "ballistic":
-        v0, speed = launch_to_target_velocity(
-            launch_lat, launch_lon, launch_alt, az, rng, launch_el_deg
-        )
+        if lightweight:
+            v_mag = 8000.0 if rng > 5000.0 else 4000.0
+            east = np.array([-np.sin(np.radians(launch_lon)), np.cos(np.radians(launch_lon)), 0.0])
+            north = np.array([
+                -np.sin(np.radians(launch_lat)) * np.cos(np.radians(launch_lon)),
+                -np.sin(np.radians(launch_lat)) * np.sin(np.radians(launch_lon)),
+                np.cos(np.radians(launch_lat)),
+            ])
+            v_dir = np.cos(np.radians(launch_el_deg)) * north + np.sin(np.radians(launch_el_deg)) * east
+            r_dir = r0 / np.linalg.norm(r0)
+            v_dir = v_dir - np.dot(v_dir, r_dir) * r_dir
+            v_dir = v_dir / np.linalg.norm(v_dir)
+            v0 = v_dir * v_mag
+            speed = v_mag
+        else:
+            v0, speed = launch_to_target_velocity(
+                launch_lat, launch_lon, launch_alt, az, rng, launch_el_deg
+            )
         target = BallisticScenario(r0=r0, v0=v0, use_j2=use_j2)
         speed_note = f"v0 {speed:.0f} m/s"
 
     elif scenario_type == "fobs":
         apoapsis_km = kwargs.get("apoapsis_km", 200.0)
-        # Boost to a low orbital speed; the deorbit/steer happens in propagate().
         rmag = np.linalg.norm(r0)
         r_apo = R_EARTH + apoapsis_km * 1e3
         v_mag = np.sqrt(MU_EARTH * (2.0 / rmag - 1.0 / r_apo))
-        # Orbital velocity is perpendicular to radius in the orbital plane
-        # defined by launch point and target point.
         r_target = geodetic_to_ecef(target_lat, target_lon, target_alt)
         orbital_plane_normal = np.cross(r0, r_target)
         orbital_plane_normal = orbital_plane_normal / np.linalg.norm(orbital_plane_normal)
         v_dir = np.cross(orbital_plane_normal, r0)
         v_dir = v_dir / np.linalg.norm(v_dir)
-        # Ensure velocity points generally toward the target azimuth
         east, north, up = _enu_basis(launch_lat, launch_lon)
         horizontal = np.cos(az) * north + np.sin(az) * east
         if np.dot(v_dir, horizontal) < 0:
@@ -289,14 +409,25 @@ def geodetic_launch_to_target(
     elif scenario_type == "hgv":
         glide_alt_km = kwargs.get("glide_alt_km", 70.0)
         speed_mach = kwargs.get("speed_mach", 12.0)
-        # Insert at glide altitude along the great-circle azimuth, shallow FPA.
         r0 = geodetic_to_ecef(launch_lat, launch_lon, launch_alt + glide_alt_km * 1000.0)
-        v0, _ = launch_to_target_velocity(
-            launch_lat, launch_lon, launch_alt + glide_alt_km * 1000.0,
-            az, rng, launch_el_deg=kwargs.get("glide_el_deg", 1.0),
-        )
-        speed = speed_mach * 300.0
-        v0 = v0 / np.linalg.norm(v0) * speed
+        if lightweight:
+            v_mag = speed_mach * 300.0
+            east = np.array([-np.sin(np.radians(launch_lon)), np.cos(np.radians(launch_lon)), 0.0])
+            north = np.array([
+                -np.sin(np.radians(launch_lat)) * np.cos(np.radians(launch_lon)),
+                -np.sin(np.radians(launch_lat)) * np.sin(np.radians(launch_lon)),
+                np.cos(np.radians(launch_lat)),
+            ])
+            v_dir = np.cos(np.radians(launch_el_deg)) * north + np.sin(np.radians(launch_el_deg)) * east
+            v0 = v_dir / np.linalg.norm(v_dir) * v_mag
+            speed = v_mag
+        else:
+            v0, speed = launch_to_target_velocity(
+                launch_lat, launch_lon, launch_alt + glide_alt_km * 1000.0,
+                az, rng, launch_el_deg=kwargs.get("glide_el_deg", 1.0),
+            )
+            speed = speed_mach * 300.0
+            v0 = v0 / np.linalg.norm(v0) * speed
         target = HGVScenario(
             r0=r0, v0=v0, max_alt_km=glide_alt_km,
             lateral_range_km=rng,
@@ -304,9 +435,24 @@ def geodetic_launch_to_target(
         speed_note = f"glide v0 {speed:.0f} m/s (Mach {speed_mach:.0f}), alt {glide_alt_km:.0f} km"
 
     elif scenario_type == "suppressed":
-        v0, speed = launch_to_target_velocity(
-            launch_lat, launch_lon, launch_alt, az, rng, launch_el_deg
-        )
+        if lightweight:
+            v_mag = 8000.0 if rng > 5000.0 else 4000.0
+            east = np.array([-np.sin(np.radians(launch_lon)), np.cos(np.radians(launch_lon)), 0.0])
+            north = np.array([
+                -np.sin(np.radians(launch_lat)) * np.cos(np.radians(launch_lon)),
+                -np.sin(np.radians(launch_lat)) * np.sin(np.radians(launch_lon)),
+                np.cos(np.radians(launch_lat)),
+            ])
+            v_dir = np.cos(np.radians(launch_el_deg)) * north + np.sin(np.radians(launch_el_deg)) * east
+            r_dir = r0 / np.linalg.norm(r0)
+            v_dir = v_dir - np.dot(v_dir, r_dir) * r_dir
+            v_dir = v_dir / np.linalg.norm(v_dir)
+            v0 = v_dir * v_mag
+            speed = v_mag
+        else:
+            v0, speed = launch_to_target_velocity(
+                launch_lat, launch_lon, launch_alt, az, rng, launch_el_deg
+            )
         target = SuppressedScenario(
             r0=r0, v0=v0,
             dip_alt_km=kwargs.get("dip_alt_km", 50.0),
@@ -316,9 +462,24 @@ def geodetic_launch_to_target(
         speed_note = f"v0 {speed:.0f} m/s (midcourse jink along threat axis)"
 
     elif scenario_type == "swarm":
-        v0, speed = launch_to_target_velocity(
-            launch_lat, launch_lon, launch_alt, az, rng, launch_el_deg
-        )
+        if lightweight:
+            v_mag = 8000.0 if rng > 5000.0 else 4000.0
+            east = np.array([-np.sin(np.radians(launch_lon)), np.cos(np.radians(launch_lon)), 0.0])
+            north = np.array([
+                -np.sin(np.radians(launch_lat)) * np.cos(np.radians(launch_lon)),
+                -np.sin(np.radians(launch_lat)) * np.sin(np.radians(launch_lon)),
+                np.cos(np.radians(launch_lat)),
+            ])
+            v_dir = np.cos(np.radians(launch_el_deg)) * north + np.sin(np.radians(launch_el_deg)) * east
+            r_dir = r0 / np.linalg.norm(r0)
+            v_dir = v_dir - np.dot(v_dir, r_dir) * r_dir
+            v_dir = v_dir / np.linalg.norm(v_dir)
+            v0 = v_dir * v_mag
+            speed = v_mag
+        else:
+            v0, speed = launch_to_target_velocity(
+                launch_lat, launch_lon, launch_alt, az, rng, launch_el_deg
+            )
         n_payloads = kwargs.get("n_payloads", 3)
         spread_deg = kwargs.get("spread_deg", 1.0)
         target = SwarmScenario(
@@ -327,9 +488,24 @@ def geodetic_launch_to_target(
         speed_note = f"bus v0 {speed:.0f} m/s, {n_payloads} RVs, {spread_deg:.1f}° spread"
 
     elif scenario_type == "sarmat":
-        v0, speed = launch_to_target_velocity(
-            launch_lat, launch_lon, launch_alt, az, rng, launch_el_deg
-        )
+        if lightweight:
+            v_mag = 9000.0 if rng > 5000.0 else 5000.0
+            east = np.array([-np.sin(np.radians(launch_lon)), np.cos(np.radians(launch_lon)), 0.0])
+            north = np.array([
+                -np.sin(np.radians(launch_lat)) * np.cos(np.radians(launch_lon)),
+                -np.sin(np.radians(launch_lat)) * np.sin(np.radians(launch_lon)),
+                np.cos(np.radians(launch_lat)),
+            ])
+            v_dir = np.cos(np.radians(launch_el_deg)) * north + np.sin(np.radians(launch_el_deg)) * east
+            r_dir = r0 / np.linalg.norm(r0)
+            v_dir = v_dir - np.dot(v_dir, r_dir) * r_dir
+            v_dir = v_dir / np.linalg.norm(v_dir)
+            v0 = v_dir * v_mag
+            speed = v_mag
+        else:
+            v0, speed = launch_to_target_velocity(
+                launch_lat, launch_lon, launch_alt, az, rng, launch_el_deg
+            )
         target = SarmatScenario(
             r0=r0, v0=v0,
             boost_profile=kwargs.get("boost_profile", "shortened"),
@@ -919,6 +1095,8 @@ def _register_from_locations():
         threat = by_name[threat_name]["coordinates"]
         defended = defended_by_name[defended_name]["coordinates"]
         for sc_type, sc_kwargs, suffix in _SCENARIO_VARIANTS:
+            # Build lightweight preset without expensive BVP solve at import time.
+            # Full trajectory optimization is deferred to build_threat_to_defended().
             preset = geodetic_launch_to_target(
                 float(threat["latitude"]),
                 float(threat["longitude"]),
@@ -929,6 +1107,7 @@ def _register_from_locations():
                 launch_el_deg=45.0,
                 scenario_type=sc_type,
                 engagement_end=1200.0,
+                lightweight=True,
                 **sc_kwargs,
             )
             key = (

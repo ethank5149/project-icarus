@@ -367,15 +367,6 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         original_filename="kh47m2.stl",
         raw_scale=0.4830,
     ),
-    "aim120": VehicleSTLInfo(
-        key="aim120",
-        filename="model.stl",
-        scale=1.0,
-        proxy_for="aim120",
-        notes="OSINT AIM-120 (AMRAAM). Normalized: centered, +Z axis, 3.650 m.",
-        original_filename="aim120-amraam.stl",
-        raw_scale=0.0106,
-    ),
     "atacms": VehicleSTLInfo(
         key="atacms",
         filename="model.stl",
@@ -393,15 +384,6 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         notes="OSINT BGM-109 (Tomahawk). Normalized: centered, +Z axis, 5.560 m.",
         original_filename="bgm109-tomahawk.stl",
         raw_scale=0.0429,
-    ),
-    "harpoon": VehicleSTLInfo(
-        key="harpoon",
-        filename="model.stl",
-        scale=1.0,
-        proxy_for="harpoon",
-        notes="OSINT RGM-84 (Harpoon). Normalized: centered, +Z axis, 4.600 m.",
-        original_filename="rgm84-harpoon.stl",
-        raw_scale=0.3803,
     ),
     "hwasong12": VehicleSTLInfo(
         key="hwasong12",
@@ -456,15 +438,6 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         notes="OSINT SLAM (Project Pluto). Normalized: centered, +Z axis.",
         original_filename="project-pluto-slam.stl",
         raw_scale=1.0000,
-    ),
-    "skybolt": VehicleSTLInfo(
-        key="skybolt",
-        filename="model.stl",
-        scale=1.0,
-        proxy_for="skybolt",
-        notes="OSINT GAM-87 (AGM-48) Skybolt. Normalized: centered, +Z axis, 11.660 m.",
-        original_filename="skybolt.stl",
-        raw_scale=0.9777,
     ),
     "titan2": VehicleSTLInfo(
         key="titan2",
@@ -564,15 +537,6 @@ _MANIFEST: Dict[str, VehicleSTLInfo] = {
         notes="OSINT AGM-158 (JASSM). Normalized: centered, +Z axis, 4.270 m.",
         original_filename="agm158.stl",
         raw_scale=0.0247,
-    ),
-    "sram": VehicleSTLInfo(
-        key="sram",
-        filename="model.stl",
-        scale=1.0,
-        proxy_for="sram",
-        notes="OSINT AGM-69A (SRAM). Normalized: centered, +Z axis, 4.830 m.",
-        original_filename="agm69a-sram.stl",
-        raw_scale=0.0288,
     ),
     "thor": VehicleSTLInfo(
         key="thor",

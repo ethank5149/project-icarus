@@ -730,26 +730,6 @@ VEHICLE_PRESETS: Dict[str, VehicleGeometry] = {
         metadata={"range_km": 1500, "warhead": "maneuvering reentry, nuclear-capable", "booster": "derivative of DF-21D", "status": "developmental, flight tests undisclosed", "launch_platform": "H-6N bomber"},
         source="reference/threat-vehicle-deep-research-report.md",
     ),
-    "aim120": VehicleGeometry(
-        name="AIM-120 (AMRAAM)",
-        body_length=3.65,
-        body_diameter=0.178,
-        nose_length=0.9,
-        nose_type="cone",
-        nose_radius=0.0,
-        tail_length=0.5,
-        fin_count=4,
-
-        fin_span=0.5,
-        fin_root_chord=1.0,
-        fin_tip_chord=0.5,
-        fin_leading_edge=0.2,
-        fin_thickness=0.03,
-
-        stl_alias="aim120",
-        metadata={"range_km": "130–160 (AIM‑120D)", "speed_mach": "Mach 4", "mass_t": "0.1615", "payload": "20 kg blast-frag", "cep_m": "– (modern AAM, few m)"},
-        source="reference/additional-vehicle-specs.md",
-    ),
     "atacms": VehicleGeometry(
         name="MGM-140 (ATACMS)",
         body_length=4.0,
@@ -788,26 +768,6 @@ VEHICLE_PRESETS: Dict[str, VehicleGeometry] = {
 
         stl_alias="tomahawk",
         metadata={"range_km": "2500 (Block II)", "speed_mach": "~Mach 0.74", "mass_t": "1.30", "payload": "450 kg unitary or 266 kg submunitions", "cep_m": "– (GPS/INS guided)"},
-        source="reference/additional-vehicle-specs.md",
-    ),
-    "harpoon": VehicleGeometry(
-        name="RGM-84 (Harpoon)",
-        body_length=4.6,
-        body_diameter=0.343,
-        nose_length=1.1,
-        nose_type="ogive",
-        nose_radius=0.0,
-        tail_length=0.7,
-        fin_count=4,
-
-        fin_span=3.1,
-        fin_root_chord=6.2,
-        fin_tip_chord=3.1,
-        fin_leading_edge=1.6,
-        fin_thickness=0.03,
-
-        stl_alias="harpoon",
-        metadata={"range_km": "124–240", "speed_mach": "0.85", "mass_t": "0.691", "payload": "224 kg high-explosive", "cep_m": "–"},
         source="reference/additional-vehicle-specs.md",
     ),
     "hwasong12": VehicleGeometry(
@@ -892,26 +852,6 @@ VEHICLE_PRESETS: Dict[str, VehicleGeometry] = {
 
         stl_alias="slam",
         metadata={"range_km": "182,000", "speed_mach": "Mach 4.2", "mass_t": "(nuclear engine)", "payload": "16 x 0.3 Mt nuclear", "cep_m": "-"},
-        source="reference/additional-vehicle-specs.md",
-    ),
-    "skybolt": VehicleGeometry(
-        name="GAM-87 (AGM-48) Skybolt",
-        body_length=11.66,
-        body_diameter=0.89,
-        nose_length=2.9,
-        nose_type="cone",
-        nose_radius=0.0,
-        tail_length=1.7,
-        fin_count=4,
-
-        fin_span=1.7,
-        fin_root_chord=3.4,
-        fin_tip_chord=1.7,
-        fin_leading_edge=0.8,
-        fin_thickness=0.03,
-
-        stl_alias="skybolt",
-        metadata={"range_km": "1850", "speed_mach": "Mach 12", "mass_t": "5.0", "payload": "1 Mt W59", "cep_m": "–"},
         source="reference/additional-vehicle-specs.md",
     ),
     "titan2": VehicleGeometry(
@@ -1090,20 +1030,6 @@ VEHICLE_PRESETS: Dict[str, VehicleGeometry] = {
 
         stl_alias="jassm",
         metadata={"range_km": "370 (A) (1000 for ER)", "speed_mach": "Subsonic (~Mach 0.7)", "mass_t": "1.02", "payload": "450 kg WDU-42/B penetrator", "cep_m": "3"},
-        source="reference/additional-vehicle-specs.md",
-    ),
-    "sram": VehicleGeometry(
-        name="AGM-69A (SRAM)",
-        body_length=4.83,
-        body_diameter=0.44,
-        nose_length=1.2,
-        nose_type="cone",
-        nose_radius=0.0,
-        tail_length=0.7,
-        fin_count=0,
-
-        stl_alias="sram",
-        metadata={"range_km": "200", "speed_mach": "Mach 3", "mass_t": "1.01", "payload": "W69 nuclear (170–200 kt)", "cep_m": "430"},
         source="reference/additional-vehicle-specs.md",
     ),
     "thor": VehicleGeometry(
