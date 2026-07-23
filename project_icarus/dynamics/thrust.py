@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 import numpy as np
 from .coordinate_systems import quat_normalize
@@ -43,7 +43,6 @@ class MKVSystem:
             return state
         new_state = dict(state)
         new_state["m"] = state["m"] - self.kv_mass
-        # Spring ejection: relative velocity along bus +x (body frame).
         new_state["v"] = state["v"] + self.v_rel * np.array([1.0, 0.0, 0.0])
         new_state["q"] = quat_normalize(state["q"])
         self.separated = True
@@ -76,7 +75,6 @@ class ThrustModel:
 
     def gimbal(self, t, commanded_angles):
         cmd = np.clip(np.asarray(commanded_angles, dtype=float), -self.gimbal_limits, self.gimbal_limits)
-        # First-order gimbal rate limit (per-step approximation).
         max_step = self.gimbal_rate
         clamped = np.clip(cmd, self._gimbal - max_step, self._gimbal + max_step)
         self._gimbal = clamped
@@ -87,7 +85,6 @@ class ThrustModel:
         if gimbal_angles is None:
             gimbal_angles = self._gimbal
         pitch, yaw = gimbal_angles
-        # Rotate base [-x body] thrust by gimbal pitch/yaw.
         v = np.array([np.cos(pitch) * np.cos(yaw),
                       np.sin(yaw),
                       np.sin(pitch) * np.cos(yaw)])
@@ -120,6 +117,10 @@ class StageSpec:
     the corresponding centre-of-gravity offset (m, body frame) used for the
     gravity-gradient torque. Both feed the post-separation inertia update in the
     integrator loop (Phase 1B.2).
+
+    ``thrust_table`` is an optional callable ``(alt_m, mach) -> float`` that
+    returns a thrust multiplier (1.0 = nominal).  When ``None`` the stage uses
+    constant thrust as specified by ``thrust``.
     """
 
     thrust: Callable[[float], float]
@@ -132,6 +133,7 @@ class StageSpec:
     name: str = "stage"
     inertia: Optional[np.ndarray] = None
     cg: Optional[np.ndarray] = None
+    thrust_table: Optional[Callable[[float, float], float]] = None
 
 
 class MultiStageThrustModel:
@@ -165,7 +167,6 @@ class MultiStageThrustModel:
         return sum(s.burn_time for s in self.stages)
 
     def stage_index_at(self, t: float) -> int:
-        """Return the index of the currently-burning (or last-burnt) stage."""
         idx = 0
         for i, t0 in enumerate(self._ignition_times):
             if t >= t0:
@@ -180,13 +181,22 @@ class MultiStageThrustModel:
             return 0.0
         if t_stage > s.burn_time:
             return 0.0
-        return float(s.thrust(t_stage))
+        T_base = float(s.thrust(t_stage))
+        if s.thrust_table is None or state is None:
+            return T_base
+        try:
+            alt = float(np.linalg.norm(state.get("r", np.zeros(3))) - 6371e3)
+            v = state.get("v", np.zeros(3))
+            vmag = float(np.linalg.norm(v))
+            mach = vmag / 295.0 if vmag > 1e-6 else 0.0
+            mult = float(s.thrust_table(alt, mach))
+            return T_base * max(mult, 0.0)
+        except Exception:
+            return T_base
 
     def thrust_vector(self, t, state, gimbal_angles=None):
         T = self.thrust(t, state)
-        # Use the active stage's gimbal limits for deflection characterization.
         idx = self.stage_index_at(t)
-        # Base thrust points along -x body (a convention used throughout the project).
         if gimbal_angles is None:
             gimbal_angles = np.zeros(2)
         pitch, yaw = np.asarray(gimbal_angles, dtype=float)
@@ -205,7 +215,6 @@ class MultiStageThrustModel:
         return -T / (self.stages[idx].Isp * G0)
 
     def separation_for_stage(self, stage_idx: int) -> Optional[StageSeparation]:
-        """Build the separation event that fires when stage ``stage_idx`` burns out."""
         if stage_idx >= len(self.stages):
             return None
         s = self.stages[stage_idx]
@@ -223,13 +232,6 @@ class MultiStageThrustModel:
         return [self.separation_for_stage(i) for i in range(len(self.stages))]
 
     def inertia_after_separation(self, stage_idx: int) -> Optional[np.ndarray]:
-        """Residual bus inertia (kg m^2) once stage ``stage_idx`` is jettisoned.
-
-        The flying vehicle keeps the inertia declared on the *next* stage
-        (which physically carries the upper bus); for the final stage burnout it
-        falls back to that stage's own declared ``inertia``. Returns ``None`` when
-        neither the next stage nor the separated stage declares an inertia.
-        """
         n = len(self.stages)
         if stage_idx < 0 or stage_idx >= n:
             return None
@@ -241,11 +243,6 @@ class MultiStageThrustModel:
         return None
 
     def cg_after_separation(self, stage_idx: int) -> Optional[np.ndarray]:
-        """Residual bus CG offset (m, body frame) once stage ``stage_idx`` separates.
-
-        Mirrors :meth:`inertia_after_separation`: the flying bus inherits the CG
-        declared on the next stage, falling back to the separated stage's CG.
-        """
         n = len(self.stages)
         if stage_idx < 0 or stage_idx >= n:
             return None

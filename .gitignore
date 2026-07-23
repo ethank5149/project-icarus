@@ -11,6 +11,8 @@ reference/ERA5/
 reference/models/
 reference/vehicles/
 
+docs/*.md
+
 # Dymos / OpenMDAO run outputs (regenerated on each trajectory-optimization run)
 *_out/
 problem_out/

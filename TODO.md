@@ -1,7 +1,12 @@
-- Extend and fortify target ICBM, Cruise Missile, and HGV trajectory modeling and simulations to be physically accurate for any given target launch site and defended target pair.
-- Add tests that assert (each type of) targets accurately reach their target when unintercepted for simulation robustness.
-- Thoroughly inspect entire codebase for potential efficiency improvements (more advanced algorithms, parallelization, vectorization, etc), make sure to intelligently and creatively utilize existing nvidia gpu hardware.
-- Implement physically accurate (CAD) models for each interceptor and target vehicle in the library for CFD data generation.
-- Consider NRLMSISE-2.1 atmospheric density model.
-- Ingest GMTED2010 global surface elevation data in reference dir for use in a LUT or interpolator for better accuracy
-- add tests for all mathematical calulations asserted by physically accurate and confirmed answers (geometry/geodetic calculations, conservation of energy/momentum in appropriate regimes, etc.)
+- Replace SarmatScenario manual RK4 integrator with Dymos+OpenMDAO Radau transcription for proper BVP solving
+- Create SarmatBoostODE in project_icarus/optimization/phases/sarmat_boost_phase.py exposing el_0, el_1, t_cross, T3_scale as Dymos parameters
+- Create sarmat_trajectory.py problem assembly with boost/midcourse/terminal phases linked by state continuity
+- Wire MultiStageThrustModel + EOM6DOF into offensive boost ODE; verify stage separation events
+- Upgrade thrust.py to accept altitude/Mach-dependent thrust tables and stage separation impulses
+- Implement energy-based pitch schedule in boost_guidance.py as alternative to fixed staged elevation
+- Add Predictive Impact Point (PIP) midcourse guidance for closed-loop correction
+- Extend GPR aero surrogate to 6-DOF coefficients (Cx, Cy, Cz, Cl, Cm, Cn) with control deflection inputs
+- Verify gravity_inertial handles ECEF transport (Coriolis, centrifugal) for long-duration intercontinental flights
+- Add Monte Carlo dispersion harness (joblib/dask) for CEP characterization: thrust ±3%, mass ±1%, wind ±20%
+- Add tests/test_sarmat_trajectory.py verifying Dymos assembles and achieves miss < 10 km
+- Add tests/test_sarmat_mc.py for 1000-run Monte Carlo CEP validation

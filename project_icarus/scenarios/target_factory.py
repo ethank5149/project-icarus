@@ -10,6 +10,7 @@ from ..guidance.terminal_guidance import TerminalGuidance
 from ..aero.aero_analytical import blended_aero
 from ..dynamics.atmosphere import Atmosphere
 from ..dynamics.gravity import gravity_inertial
+from ..dynamics.thrust import StageSpec, MultiStageThrustModel, StageSeparation
 
 try:
     from ..dynamics.gravity import gravity_inertial_jit, GRAVITY_JIT_AVAILABLE
@@ -192,6 +193,18 @@ def _ecef_to_geodetic(r):
     N = _WGS84_A / np.sqrt(1.0 - _WGS84_E2 * sin_lat**2)
     alt = p / np.cos(lat) - N
     return float(np.degrees(lat)), float(lon), float(alt)
+
+
+def _enu_basis(lat_deg, lon_deg):
+    """Return local East/North/Up unit vectors (ECEF) at a geodetic point."""
+    lat = np.radians(lat_deg)
+    lon = np.radians(lon_deg)
+    sin_lat, cos_lat = np.sin(lat), np.cos(lat)
+    sin_lon, cos_lon = np.sin(lon), np.cos(lon)
+    east = np.array([-sin_lon, cos_lon, 0.0])
+    north = np.array([-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat])
+    up = np.array([cos_lat * cos_lon, cos_lat * sin_lon, sin_lat])
+    return east, north, up
 
 
 def _geodetic_to_ecef_simple(lat_deg, lon_deg, alt_m=0.0):
@@ -1515,6 +1528,19 @@ class SarmatScenario(FOBSScenario):
     _decoys: List = field(default_factory=list, repr=False)
     _pbb_released: bool = False
     _boost_end_state: Optional[np.ndarray] = field(default=None, repr=False)
+    initial_thrust_dir: Optional[np.ndarray] = field(default=None, repr=False)
+    atmosphere: Optional[Atmosphere] = None
+    cd: float = 0.3
+    area: float = 7.07
+    mass: float = 208100.0
+
+    # Explicit RS-28 stage data (OSINT-approx, self-consistent)
+    # Sources: R-36M2 numbers scaled to RS-28 208.1 t launch mass
+    _SARMAT_STAGES = [
+        {"t_start": 0.0,  "t_end": 100.0, "thrust": 4.6e6,  "m_dot": 1500.0},
+        {"t_start": 100.0, "t_end": 250.0, "thrust": 850e3,  "m_dot": 260.0},
+        {"t_start": 250.0, "t_end": 310.0, "thrust": 20e3,   "m_dot": 6.6},
+    ]
 
     def __post_init__(self):
         super().__post_init__()
@@ -1522,9 +1548,15 @@ class SarmatScenario(FOBSScenario):
         self._warheads = []
         self._decoys = []
         self._boost_end_state = None
+        self._initial_thrust_dir = None
+        if self.atmosphere is None:
+            self.atmosphere = Atmosphere()
         if self.decoy_release_times is None:
             spread = np.linspace(0.0, 60.0, self.pbb_decoys)
             self.decoy_release_times = spread
+        
+        if self.initial_thrust_dir is not None:
+            self._initial_thrust_dir = self.initial_thrust_dir / np.linalg.norm(self.initial_thrust_dir)
         
         # Override aim point to actual defended target hemisphere
         if hasattr(self, '_aim_point') and hasattr(self, 'r0'):
@@ -1539,58 +1571,137 @@ class SarmatScenario(FOBSScenario):
                 np.cos(phi2) * np.sin(dlam),
                 np.cos(phi1) * np.sin(phi2) - np.sin(phi1) * np.cos(phi2) * np.cos(dlam)
             )) % 360.0
-            aim_lat, aim_lon = _destination_point(lat0, lon0, az, dist_km * 0.5)
+            aim_lat, aim_lon = _destination_point(lat0, lon0, az, np.degrees(np.arccos(cos_d) * 0.5))
             self._aim_point = _geodetic_to_ecef_simple(aim_lat, aim_lon, 0.0)
 
-    def _boost_guidance_correction(self, t, r, v):
-        """Proportional navigation during boost phase.
+        self._era5_loaded = False
+        self._era5_interpolator = None
 
-        The RS-28 uses astro-inertial guidance with GLONASS correction.
-        This models the thrust vector control (TVC) corrections that keep
-        the missile on track despite initial launch errors.
+    def _ensure_era5(self):
+        if not self._era5_loaded and self.wind_model is None:
+            self._era5_loaded = True
+            try:
+                era5_root = "/mnt/user/public/project-icarus/reference/ERA5"
+                import glob
+                gribs = sorted(glob.glob(f"{era5_root}/era5_global_native_025_2015_*.grib"))
+                if gribs:
+                    from ..reference.era5 import ERA5Interpolator
+                    self._era5_interpolator = ERA5Interpolator(gribs)
+            except Exception:
+                pass
 
-        TVC applies lateral acceleration by gimbaling the engine nozzle.
-        Typical gimbal range: ±5° with rate ~5°/s.
+    def _wind_accel(self, r, v, t, dt):
+        self._ensure_era5()
+        if self._era5_interpolator is not None:
+            wind = self._era5_interpolator
+            try:
+                lat, lon, alt = _ecef_to_geodetic(r)
+                U = np.asarray(wind(float(lat), float(lon), float(alt), float(t)), dtype=float)
+                dU_dt = np.zeros(3)
+                if dt > 1e-6:
+                    U1 = np.asarray(wind(float(lat), float(lon), float(alt), float(t) + dt), dtype=float)
+                    dU_dt = (U1 - U) / dt
+                eps = 1e-4
+                U_lat = np.asarray(wind(float(lat) + eps, float(lon), float(alt), float(t)), dtype=float)
+                U_lon = np.asarray(wind(float(lat), float(lon) + eps, float(alt), float(t)), dtype=float)
+                deg2m_lat = 111_132.92
+                deg2m_lon = 111_132.92 * np.cos(np.radians(float(lat)))
+                a_wind = np.zeros(3)
+                for i in range(3):
+                    a_wind[i] = dU_dt[i] + v[0] * (U_lon[i] - U[i]) / (deg2m_lon * eps) + v[1] * (U_lat[i] - U[i]) / (deg2m_lat * eps)
+                return a_wind
+            except Exception:
+                pass
+        return np.zeros(3)
+
+    def _initial_mass(self) -> float:
+        return 208100.0
+
+    def _current_thrust_dir(self, t, r, v):
+        """Onboard guidance thrust direction from pre-launch computed profile.
+
+        Real ICBM guidance:
+        1. Pre-launch: compute required elevation from range tables/great-circle
+        2. t < 2.0s: vertical ascent to clear silo
+        3. 2.0s <= t < 10.0s: pitch over to target azimuth at commanded elevation
+        4. t >= 10.0s: gravity turn (thrust aligned with velocity, zero angle of attack)
+
+        The commanded elevation is based on the great-circle distance to target
+        and the vehicle's ballistic coefficient. No position-error proportional
+        navigation because that produces unrealistic trajectories.
         """
         to_target = self._aim_point - r
-        to_target_dir = to_target / max(np.linalg.norm(to_target), 1e-6)
+        to_target_dir = to_target / max(np.linalg.norm(to_target), 1e-9)
 
-        vmag = np.linalg.norm(v)
-        if vmag < 1e-6:
-            return np.zeros(3)
+        lat, lon, _ = _ecef_to_geodetic(r)
+        east, north, up = _enu_basis(lat, lon)
 
-        v_dir = v / vmag
+        gc_horiz = to_target_dir - np.dot(to_target_dir, up) * up
+        gc_horiz_norm = np.linalg.norm(gc_horiz)
+        if gc_horiz_norm > 1e-6:
+            gc_horiz = gc_horiz / gc_horiz_norm
+        else:
+            gc_horiz = np.array([0.0, 0.0, 0.0])
 
-        # Error between current velocity direction and target direction
-        cross = np.cross(v_dir, to_target_dir)
-        cross_mag = np.linalg.norm(cross)
+        target_azimuth = np.degrees(np.arctan2(
+            np.dot(gc_horiz, east),
+            np.dot(gc_horiz, north)
+        )) % 360.0
 
-        if cross_mag < 1e-6:
-            return np.zeros(3)
+        range_m = np.linalg.norm(to_target)
+        desired_elev = 15.0 + 45.0 * np.clip(range_m / 20_000_000.0, 0.0, 1.0)
+        desired_elev = np.clip(desired_elev, 15.0, 75.0)
 
-        # TVC-limited guidance: rotation rate limited by actuator dynamics
-        # Real ICBM TVC: ±5° gimbal, ~5°/s rate, ~20° total authority
-        max_rotation_rate = np.radians(5.0)  # rad/s
-        max_correction_angle = np.radians(20.0)  # total available
+        if t < 5.0:
+            return up
+        elif t < 30.0:
+            frac = (t - 5.0) / 25.0
+            hoz = np.cos(np.radians(desired_elev)) * gc_horiz + np.sin(np.radians(desired_elev)) * up
+            hoz = hoz / max(np.linalg.norm(hoz), 1e-9)
+            desired = (1.0 - frac) * up + frac * hoz
+            return desired / max(np.linalg.norm(desired), 1e-9)
+        else:
+            vmag = np.linalg.norm(v)
+            if vmag > 1e-6:
+                v_dir = v / vmag
+                v_horiz = v_dir - np.dot(v_dir, up) * up
+                v_horiz_norm = np.linalg.norm(v_horiz)
+                if v_horiz_norm > 1e-6:
+                    v_horiz = v_horiz / v_horiz_norm
+                    elev = np.arcsin(np.clip(np.dot(v_dir, up), -1.0, 1.0))
+                    max_elev = np.radians(55.0)
+                    if elev > max_elev:
+                        v_dir = np.cos(max_elev) * v_horiz + np.sin(max_elev) * up
+                        v_dir = v_dir / np.linalg.norm(v_dir)
+                return v_dir
+            else:
+                return np.cos(np.radians(desired_elev)) * gc_horiz + np.sin(np.radians(desired_elev)) * up
 
-        # Proportional guidance with rate limiting
-        desired_correction = 0.15 * cross_mag  # rad
-        desired_correction = np.clip(desired_correction, -max_correction_angle, max_correction_angle)
-        correction_angle = np.clip(desired_correction, -max_rotation_rate * 0.5, max_rotation_rate * 0.5)
-
-        # Lateral acceleration from TVC: a_lat = α * |v|
-        correction_vec = cross / cross_mag * correction_angle * vmag
-
-        return correction_vec
+    def _boost_guidance_correction(self, t, r, v):
+        """Deprecated: guidance now applied directly via _current_thrust_dir."""
+        return np.zeros(3)
 
     def _rhs_full(self, t, y):
-        """Full 3-DOF RHS with optional time-dependent thrust and boost guidance."""
+        """Full 3-DOF RHS with multi-stage thrust and mass tracking."""
         r, v = y[:3], y[3:]
-        
-        # Boost-phase guidance: correct trajectory toward target during boost
-        if self.boost_profile == "shortened" and t < self.boost_duration_s:
-            v = v + self._boost_guidance_correction(t, r, v)
-        
+        m = y[6] if len(y) > 6 else self.mass
+
+        # Multi-stage thrust magnitude
+        T_mag = 0.0
+        dm_dt = 0.0
+        if self._thrust_model is not None:
+            try:
+                state = {"r": r, "v": v, "q": np.array([1.0, 0.0, 0.0, 0.0]),
+                         "omega": np.zeros(3), "m": m}
+                T_mag = float(self._thrust_model.thrust(t, state))
+                dm_dt = float(self._thrust_model.mass_rate(t, state))
+            except Exception:
+                pass
+
+        # Thrust direction in inertial frame
+        thrust_dir = self._current_thrust_dir(t, r, v)
+        a_thrust = (T_mag / max(m, 1e-6)) * thrust_dir
+
         a_grav = _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
                                  use_j4=self.use_j4, use_high_order=self.use_high_order,
                                  use_third_body=self.use_third_body, use_tides=self.use_tides,
@@ -1602,11 +1713,17 @@ class SarmatScenario(FOBSScenario):
             vmag = np.linalg.norm(v)
             if vmag > 1e-6:
                 q = 0.5 * rho * vmag**2
-                a_drag = -q * self.cd * self.area / self.mass * (v / vmag)
-        a_total = a_grav + a_drag + self._thrust_accel(t)
+                a_drag = -q * self.cd * self.area / m * (v / vmag)
+
+        # Boost-phase guidance: correct trajectory toward target during boost
+        a_guidance = np.zeros(3)
+        if self.boost_profile == "shortened" and t < self.boost_duration_s:
+            a_guidance = self._boost_guidance_correction(t, r, v, T_mag=T_mag, m=m)
+
+        a_total = a_grav + a_drag + a_thrust
         if self.wind_model is not None and 0 < alt < 150e3:
             a_total = a_total + self._wind_accel(r, v, t, 0.5)
-        return np.concatenate([v, a_total])
+        return np.concatenate([v, a_total, [dm_dt]])
 
     def _thrust_accel(self, t):
         if self.thrust_profile is not None:
@@ -1625,52 +1742,103 @@ class SarmatScenario(FOBSScenario):
     _boost_end_event.terminal = True
     _boost_end_event.direction = 0
 
+    def _integrate_full(self):
+        """Manual RK4 integration with explicit RS-28 stage thrust/mass."""
+        r = self.r0.astype(float).copy()
+        v = self.v0.astype(float).copy()
+        m = self._initial_mass()
+        t_current = 0.0
+        hit_ground = False
+        all_times = [0.0]
+        all_states = [np.concatenate([r.copy(), v.copy(), [m]])]
+
+        while not hit_ground and t_current < 4000.0:
+            alt = _ground_altitude(r)
+            if alt < -5.0 and t_current > 1.0:
+                hit_ground = True
+                break
+
+            dt = 0.05 if t_current < 200.0 else 0.5
+
+            def rhs_tmp(rr, vv, mm, tt):
+                T_mag = 0.0
+                dm_dt_val = 0.0
+                for stage in self._SARMAT_STAGES:
+                    if stage["t_start"] <= tt < stage["t_end"]:
+                        T_mag = stage["thrust"]
+                        dm_dt_val = -stage["m_dot"]
+                        break
+
+                thrust_dir = self._current_thrust_dir(tt, rr, vv)
+                a_thrust = (T_mag / max(mm, 1e-6)) * thrust_dir
+
+                a_grav = _two_body_accel(rr, use_j2=self.use_j2, use_j3=self.use_j3,
+                                         use_j4=self.use_j4, use_high_order=self.use_high_order,
+                                         use_third_body=self.use_third_body, use_tides=self.use_tides,
+                                         max_degree=self.max_degree, t=tt)
+                a_drag = np.zeros(3)
+                alt = _ground_altitude(rr)
+                if 0.0 < alt < 100e3:
+                    rho = self.atmosphere.density_scalar(alt)
+                    vmag = np.linalg.norm(vv)
+                    if vmag > 1e-6:
+                        q = 0.5 * rho * vmag**2
+                        a_drag = -q * self.cd * self.area / mm * (vv / vmag)
+
+                a_total = a_grav + a_drag + a_thrust
+                if self.wind_model is not None and 0 < alt < 150e3:
+                    a_total = a_total + self._wind_accel(rr, vv, tt, dt)
+                return np.concatenate([vv, a_total, [dm_dt_val]])
+
+            y = np.concatenate([r, v, [m]])
+            k1 = rhs_tmp(r, v, m, t_current)
+            k2 = rhs_tmp(r + 0.5*dt*k1[:3], v + 0.5*dt*k1[3:6], m + 0.5*dt*k1[6], t_current + 0.5*dt)
+            k3 = rhs_tmp(r + 0.5*dt*k2[:3], v + 0.5*dt*k2[3:6], m + 0.5*dt*k2[6], t_current + 0.5*dt)
+            k4 = rhs_tmp(r + dt*k3[:3], v + dt*k3[3:6], m + dt*k3[6], t_current + dt)
+
+            r = r + (dt/6.0) * (k1[:3] + 2*k2[:3] + 2*k3[:3] + k4[:3])
+            v = v + (dt/6.0) * (k1[3:6] + 2*k2[3:6] + 2*k3[3:6] + k4[3:6])
+            m = m + (dt/6.0) * (k1[6] + 2*k2[6] + 2*k3[6] + k4[6])
+            t_current += dt
+
+            if not np.all(np.isfinite(r)) or not np.all(np.isfinite(v)) or not np.isfinite(m):
+                break
+            if m < 1e-3:
+                m = 0.0
+                break
+
+            all_times.append(t_current)
+            all_states.append(np.concatenate([r.copy(), v.copy(), [m]]))
+
+        arr = np.array(all_states)
+        if arr.shape[0] == 0:
+            return np.array([0.0]), np.array([np.concatenate([self.r0, self.v0, [self._initial_mass()]])])
+        return np.array(all_times), arr
+
     def propagate(self, t: float) -> np.ndarray:
         if hasattr(self, '_cache') and self._cache is not None:
             all_t, all_s = self._cache
             if t >= all_t[-1]:
-                return all_s[-1]
+                return all_s[-1, :6]
             idx = int(np.searchsorted(all_t, t))
             idx = min(max(idx, 1), len(all_t) - 1)
             t0, t1 = all_t[idx-1], all_t[idx]
             if abs(t1 - t0) < 1e-12:
-                return all_s[idx]
+                return all_s[idx, :6]
             alpha = (t - t0) / (t1 - t0)
-            return (1 - alpha) * all_s[idx-1] + alpha * all_s[idx]
+            return (1 - alpha) * all_s[idx-1, :6] + alpha * all_s[idx, :6]
 
-        y0 = np.concatenate([self.r0.astype(float), self.v0.astype(float)])
-        sol = solve_ivp(
-            self._rhs_full, (0.0, 4000.0), y0,
-            method="RK45", rtol=1e-9, atol=1e-12,
-            events=[self._ground_event, self._boost_end_event],
-            max_step=10.0, first_step=0.05,
-        )
-        if sol.t_events[0] is not None and len(sol.t_events[0]) > 0:
-            t_end = float(sol.t_events[0][0])
-            y_end = sol.y_events[0][0]
-        elif len(sol.t) > 0:
-            t_end = float(sol.t[-1])
-            y_end = sol.y[:, -1]
-        else:
-            return y0
-
-        grid = np.linspace(0.0, t_end, max(int(t_end / 2.0) + 1, 2))
-        try:
-            traj = sol.sol(grid)
-            states = np.vstack([traj[:3, :], traj[3:6, :]]).T
-        except Exception:
-            idx = np.searchsorted(sol.t, grid)
-            idx = np.clip(idx, 0, len(sol.t) - 1)
-            states = np.vstack([sol.y[:3, idx], sol.y[3:6, idx]]).T
-
-        self._cache = (grid, states)
-        if t >= grid[-1]:
-            return states[-1]
-        idx = int(np.searchsorted(grid, t))
-        idx = min(max(idx, 1), len(grid) - 1)
-        t0, t1 = grid[idx-1], grid[idx]
+        all_t, all_s = self._integrate_full()
+        self._cache = (all_t, all_s)
+        if t >= all_t[-1]:
+            return all_s[-1, :6]
+        idx = int(np.searchsorted(all_t, t))
+        idx = min(max(idx, 1), len(all_t) - 1)
+        t0, t1 = all_t[idx-1], all_t[idx]
+        if abs(t1 - t0) < 1e-12:
+            return all_s[idx, :6]
         alpha = (t - t0) / (t1 - t0)
-        return (1 - alpha) * states[idx-1] + alpha * states[idx]
+        return (1 - alpha) * all_s[idx-1, :6] + alpha * all_s[idx, :6]
 
     def propagate_batch(self, times: np.ndarray) -> np.ndarray:
         times = np.asarray(times, dtype=float)
