@@ -125,6 +125,14 @@ def _geodetic_altitude(r):
     return alt
 
 
+def ground_altitude(r):
+    """Compute altitude above actual ground surface (meters) using DEM."""
+    lat_deg, lon_deg, alt_ellip = ecef_to_geodetic(r)
+    from ..reference.surface_elevation import get_surface_elevation
+    elev = float(get_surface_elevation(float(lat_deg), float(lon_deg)))
+    return alt_ellip - elev
+
+
 def rotate_body_to_inertial(v_body, q):
     return quat_to_dcm(q) @ v_body
 

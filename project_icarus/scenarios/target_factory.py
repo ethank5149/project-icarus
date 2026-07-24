@@ -10,7 +10,7 @@ from ..guidance.terminal_guidance import TerminalGuidance
 from ..aero.aero_analytical import blended_aero
 from ..dynamics.atmosphere import Atmosphere
 from ..dynamics.gravity import gravity_inertial
-from ..dynamics.coordinate_systems import quat_to_dcm, quat_multiply
+from ..dynamics.coordinate_systems import quat_to_dcm, quat_multiply, ecef_to_geodetic, geodetic_to_ecef, ground_altitude
 from ..dynamics.thrust import StageSpec, MultiStageThrustModel, StageSeparation, sarmat_stage_dicts
 from ..guidance.icbm_guidance import ICBMGuidance
 from ..guidance.lambert import lambert, lambert_with_correction, required_burnout_velocity_lambert
@@ -50,28 +50,7 @@ def _wgs84_radius(r):
 
 
 def _ground_altitude(r):
-    """Compute altitude above actual ground surface (meters)."""
-    x, y, z = np.asarray(r, dtype=float)
-    lon = np.degrees(np.arctan2(y, x))
-    p = np.sqrt(x * x + y * y)
-    if p < 1e-6:
-        lat = 90.0 if z > 0 else -90.0
-        eccen_n = _WGS84_A / np.sqrt(1.0 - _WGS84_E2 * np.sin(np.radians(lat)) ** 2)
-        alt_ellip = float(abs(z) - eccen_n * (1.0 - _WGS84_E2))
-    else:
-        b = _WGS84_B
-        e_prime2 = _WGS84_E2 / (1.0 - _WGS84_E2)
-        theta = np.arctan2(z * _WGS84_A, p * b)
-        lat = np.degrees(np.arctan2(
-            z + e_prime2 * b * np.sin(theta) ** 3,
-            p - _WGS84_E2 * _WGS84_A * np.cos(theta) ** 3,
-        ))
-        sin_lat = np.sin(np.radians(lat))
-        N = _WGS84_A / np.sqrt(1.0 - _WGS84_E2 * sin_lat ** 2)
-        alt_ellip = float(p / np.cos(np.radians(lat)) - N)
-    from ..reference.surface_elevation import get_surface_elevation
-    elev = float(get_surface_elevation(float(lat), float(lon)))
-    return alt_ellip - elev
+    return ground_altitude(r)
 
 
 def _two_body_accel(r, use_j2=True, use_j3=False, use_j4=False,
@@ -215,21 +194,6 @@ def _enu_basis(lat_deg, lon_deg):
     north = np.array([-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat])
     up = np.array([cos_lat * cos_lon, cos_lat * sin_lon, sin_lat])
     return east, north, up
-
-
-def _geodetic_to_ecef_simple(lat_deg, lon_deg, alt_m=0.0):
-    """Convert geodetic to ECEF using WGS84 ellipsoid."""
-    lat = np.radians(lat_deg)
-    lon = np.radians(lon_deg)
-    sin_lat = np.sin(lat)
-    cos_lat = np.cos(lat)
-    sin_lon = np.sin(lon)
-    cos_lon = np.cos(lon)
-    N = _WGS84_A / np.sqrt(1.0 - _WGS84_E2 * sin_lat**2)
-    x = (N + alt_m) * cos_lat * cos_lon
-    y = (N + alt_m) * cos_lat * sin_lon
-    z = (N * (1.0 - _WGS84_E2) + alt_m) * sin_lat
-    return np.array([x, y, z])
 
 
 def _destination_point(lat_deg, lon_deg, az_deg, dist_deg):
@@ -417,33 +381,7 @@ class BallisticScenario:
         if self.atmosphere is None:
             self.atmosphere = Atmosphere()
 
-    def _wind_accel(self, r, v, t, dt):
-        if self.wind_model is None:
-            return np.zeros(3)
-        try:
-            lat, lon, alt = _ecef_to_geodetic(r)
-        except Exception:
-            return np.zeros(3)
-        if alt > 150e3 or alt < 0.0:
-            return np.zeros(3)
-        key = (round(float(lat), 4), round(float(lon), 4), round(float(alt), 1), round(float(t), 2))
-        if getattr(self, '_wind_cache_key', None) != key:
-            U0 = np.asarray(self.wind_model.wind(float(lat), float(lon), float(alt), float(t)), dtype=float)
-            dU_dt = np.zeros(3)
-            if dt > 1e-6:
-                U1 = np.asarray(self.wind_model.wind(float(lat), float(lon), float(alt), float(t) + dt), dtype=float)
-                dU_dt = (U1 - U0) / dt
-            eps = 1e-4
-            U_lat = np.asarray(self.wind_model.wind(float(lat) + eps, float(lon), float(alt), float(t)), dtype=float)
-            U_lon = np.asarray(self.wind_model.wind(float(lat), float(lon) + eps, float(alt), float(t)), dtype=float)
-            deg2m_lat = 111_132.92
-            deg2m_lon = 111_132.92 * np.cos(np.radians(float(lat)))
-            a_wind = np.zeros(3)
-            for i in range(3):
-                a_wind[i] = dU_dt[i] + v[0] * (U_lon[i] - U0[i]) / (deg2m_lon * eps) + v[1] * (U_lat[i] - U0[i]) / (deg2m_lat * eps)
-            self._wind_cache_key = key
-            self._wind_cache_val = a_wind.tolist()
-        return np.array(self._wind_cache_val)
+
 
     def _accel(self, r, v, t=None, dt=0.5):
         r = np.asarray(r, dtype=float)
@@ -472,7 +410,7 @@ class BallisticScenario:
             a_drag = -q_dyn * cd * self.area / self.mass * (v / vmag)
         a = a_grav + a_drag
         if t is not None:
-            a = a + self._wind_accel(r, v, t, dt)
+            a = a + self.atmosphere.wind_acceleration(r, v, t, dt)
         return a
 
     def propagate(self, t: float) -> np.ndarray:
@@ -618,7 +556,7 @@ class FOBSScenario:
             az = np.degrees(np.arctan2(np.dot(v_unit, east), np.dot(v_unit, north))) % 360.0
             coast_arc_deg = (self._coast_duration * np.linalg.norm(self.v0) / rmag) / np.pi * 180.0
             aim_lat, aim_lon = _destination_point(lat0, lon0, az, coast_arc_deg * 0.5)
-            self._aim_point = _geodetic_to_ecef_simple(aim_lat, aim_lon, 0.0)
+            self._aim_point = geodetic_to_ecef(aim_lat, aim_lon, 0.0)
         else:
             self._aim_point = np.array([R_EARTH + self._reentry_alt, 0.0, 0.0])
         self._cache = None
@@ -674,7 +612,7 @@ class FOBSScenario:
                                     use_third_body=self.use_third_body, use_tides=self.use_tides,
                                     max_degree=self.max_degree) + np.array([self.thrust, 0.0, 0.0])
                 if self.wind_model is not None and _ground_altitude(r) < 150e3:
-                    a = a + self._wind_accel(r, v, ti, dt_boost)
+                    a = a + self.atmosphere.wind_acceleration(r, v, ti, dt_boost)
                 v = v + a * dt_boost
                 r = r + v * dt_boost
             boost_states.append(np.concatenate([r.copy(), v.copy()]))
@@ -705,7 +643,7 @@ class FOBSScenario:
                                 use_third_body=self.use_third_body, use_tides=self.use_tides,
                                 max_degree=self.max_degree)
             if self.wind_model is not None and _ground_altitude(r) < 150e3:
-                a = a + self._wind_accel(r, v, ti, dt_coast)
+                a = a + self.atmosphere.wind_acceleration(r, v, ti, dt_coast)
             return np.concatenate([v, a])
 
         dt_coast = 0.05
@@ -832,34 +770,6 @@ class HGVScenario:
         if self.atmosphere is None:
             self.atmosphere = Atmosphere()
 
-    def _wind_accel(self, r, v, t, dt):
-        if self.wind_model is None:
-            return np.zeros(3)
-        try:
-            lat, lon, alt = _ecef_to_geodetic(r)
-        except Exception:
-            return np.zeros(3)
-        if alt > 150e3 or alt < 0.0:
-            return np.zeros(3)
-        key = (round(float(lat), 4), round(float(lon), 4), round(float(alt), 1), round(float(t), 2))
-        if getattr(self, '_wind_cache_key', None) != key:
-            U0 = np.asarray(self.wind_model.wind(float(lat), float(lon), float(alt), float(t)), dtype=float)
-            dU_dt = np.zeros(3)
-            if dt > 1e-6:
-                U1 = np.asarray(self.wind_model.wind(float(lat), float(lon), float(alt), float(t) + dt), dtype=float)
-                dU_dt = (U1 - U0) / dt
-            eps = 1e-4
-            U_lat = np.asarray(self.wind_model.wind(float(lat) + eps, float(lon), float(alt), float(t)), dtype=float)
-            U_lon = np.asarray(self.wind_model.wind(float(lat), float(lon) + eps, float(alt), float(t)), dtype=float)
-            deg2m_lat = 111_132.92
-            deg2m_lon = 111_132.92 * np.cos(np.radians(float(lat)))
-            a_wind = np.zeros(3)
-            for i in range(3):
-                a_wind[i] = dU_dt[i] + v[0] * (U_lat[i] - U0[i]) / (deg2m_lat * eps) + v[1] * (U_lon[i] - U0[i]) / (deg2m_lon * eps)
-            self._wind_cache_key = key
-            self._wind_cache_val = a_wind.tolist()
-        return np.array(self._wind_cache_val)
-
     def _accel(self, r, v, t=None, dt=0.5):
         vmag = np.linalg.norm(v)
         if vmag < 1e-6:
@@ -868,7 +778,7 @@ class HGVScenario:
                                      use_third_body=self.use_third_body, use_tides=self.use_tides,
                                      max_degree=self.max_degree)
             if t is not None:
-                a_grav = a_grav + self._wind_accel(r, v, t, dt)
+                a_grav = a_grav + self.atmosphere.wind_acceleration(r, v, t, dt)
             return a_grav
         g_unit = -r / np.linalg.norm(r)
         v_unit = v / vmag
@@ -894,7 +804,7 @@ class HGVScenario:
                 a_lift = q_dyn * self.cl / self.ballistic_coeff * lift_dir
         a = a_grav + a_drag + a_lift
         if t is not None:
-            a = a + self._wind_accel(r, v, t, dt)
+            a = a + self.atmosphere.wind_acceleration(r, v, t, dt)
         return a
 
     def propagate(self, t: float) -> np.ndarray:
@@ -1021,33 +931,7 @@ class SuppressedScenario:
         else:
             self._maneuver_dir = np.array([1.0, 0.0, 0.0])
 
-    def _wind_accel(self, r, v, t, dt):
-        if self.wind_model is None:
-            return np.zeros(3)
-        try:
-            lat, lon, alt = _ecef_to_geodetic(r)
-        except Exception:
-            return np.zeros(3)
-        if alt > 150e3 or alt < 0.0:
-            return np.zeros(3)
-        key = (round(float(lat), 4), round(float(lon), 4), round(float(alt), 1), round(float(t), 2))
-        if getattr(self, '_wind_cache_key', None) != key:
-            U0 = np.asarray(self.wind_model.wind(float(lat), float(lon), float(alt), float(t)), dtype=float)
-            dU_dt = np.zeros(3)
-            if dt > 1e-6:
-                U1 = np.asarray(self.wind_model.wind(float(lat), float(lon), float(alt), float(t) + dt), dtype=float)
-                dU_dt = (U1 - U0) / dt
-            eps = 1e-4
-            U_lat = np.asarray(self.wind_model.wind(float(lat) + eps, float(lon), float(alt), float(t)), dtype=float)
-            U_lon = np.asarray(self.wind_model.wind(float(lat), float(lon) + eps, float(alt), float(t)), dtype=float)
-            deg2m_lat = 111_132.92
-            deg2m_lon = 111_132.92 * np.cos(np.radians(float(lat)))
-            a_wind = np.zeros(3)
-            for i in range(3):
-                a_wind[i] = dU_dt[i] + v[0] * (U_lon[i] - U0[i]) / (deg2m_lon * eps) + v[1] * (U_lat[i] - U0[i]) / (deg2m_lat * eps)
-            self._wind_cache_key = key
-            self._wind_cache_val = a_wind.tolist()
-        return np.array(self._wind_cache_val)
+
 
     def _accel(self, r, v, t=None, dt=0.5):
         a = _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3,
@@ -1055,7 +939,7 @@ class SuppressedScenario:
                             use_third_body=self.use_third_body, use_tides=self.use_tides,
                             max_degree=self.max_degree)
         if t is not None:
-            a = a + self._wind_accel(r, v, t, dt)
+            a = a + self.atmosphere.wind_acceleration(r, v, t, dt)
         return a
 
     def propagate(self, t: float) -> np.ndarray:
@@ -1408,7 +1292,7 @@ class CruiseMissileScenario:
             a_drag = -q_dyn * 0.3 / max(m, 1e-6) * v_unit
             a = a_grav + a_thrust + a_drag
             if self.wind_model is not None:
-                a = a + self._wind_accel(r, v, ti, dt)
+                a = a + self.atmosphere.wind_acceleration(r, v, ti, dt)
             return a
 
         # --- Boost phase: rocket motor ---
@@ -1440,7 +1324,7 @@ class CruiseMissileScenario:
                                      max_degree=self.max_degree)
             a = a_grav
             if self.wind_model is not None:
-                a = a + self._wind_accel(r_cruise, cruise_v, ti, dt)
+                a = a + self.atmosphere.wind_acceleration(r_cruise, cruise_v, ti, dt)
             r_cruise = r_cruise + cruise_v * dt + 0.5 * a * dt * dt
             r_cruise = r_cruise / np.linalg.norm(r_cruise) * (R_EARTH + self.cruise_alt_m)
             radial = r_cruise / np.linalg.norm(r_cruise)
@@ -1475,7 +1359,7 @@ class CruiseMissileScenario:
                                      max_degree=self.max_degree)
             a = a_grav + dive_v * 3.0
             if self.wind_model is not None:
-                a = a + self._wind_accel(r, v, ti, dt)
+                a = a + self.atmosphere.wind_acceleration(r, v, ti, dt)
             return a
 
         for ti in dive_t:
@@ -1655,7 +1539,7 @@ class SarmatScenario(FOBSScenario):
         
         # Override aim point to exact defended target coordinates
         if hasattr(self, 'r0'):
-            self._aim_point = _geodetic_to_ecef_simple(
+            self._aim_point = geodetic_to_ecef(
                 self._TARGET_LAT, self._TARGET_LON, self._TARGET_ALT
             )
         
@@ -1663,7 +1547,7 @@ class SarmatScenario(FOBSScenario):
         self._era5_interpolator = None
 
         self._guidance = ICBMGuidance(
-            target_ecef=self._aim_point if hasattr(self, '_aim_point') else _geodetic_to_ecef_simple(
+            target_ecef=self._aim_point if hasattr(self, '_aim_point') else geodetic_to_ecef(
                 self._TARGET_LAT, self._TARGET_LON, self._TARGET_ALT
             ),
             launch_ecef=self.r0,
@@ -1761,7 +1645,7 @@ class SarmatScenario(FOBSScenario):
 
         a_total = a_grav + a_drag + a_thrust
         if self.wind_model is not None and 0 < alt < 150e3:
-            a_total = a_total + self._wind_accel(r, v, t, 0.5)
+            a_total = a_total + self.atmosphere.wind_acceleration(r, v, t, 0.5)
         return np.concatenate([v, a_total, [dm_dt]])
 
     def _thrust_accel(self, t):
@@ -1857,7 +1741,7 @@ class SarmatScenario(FOBSScenario):
 
                 a_total = a_grav + a_drag + a_thrust
                 if self.wind_model is not None and 0 < alt < 150e3:
-                    a_total = a_total + self._wind_accel(rr, vv, tt, dt)
+                    a_total = a_total + self.atmosphere.wind_acceleration(rr, vv, tt, dt)
 
                 # Rotational dynamics: tau = I * alpha + omega x (I * omega)
                 # Aerodynamic moment from CoP-CoM offset

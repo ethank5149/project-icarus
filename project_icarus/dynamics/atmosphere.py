@@ -298,6 +298,37 @@ class Atmosphere:
             return self._wind_model.wind(lat, lon, alt, time)
         return 0.0, 0.0, 0.0
 
+    def wind_acceleration(self, r, v, t, dt):
+        wind_model = self._wind_model
+        if wind_model is None:
+            return np.zeros(3)
+        try:
+            from .coordinate_systems import ecef_to_geodetic
+            lat, lon, alt = ecef_to_geodetic(r)
+        except Exception:
+            return np.zeros(3)
+        if alt > 150e3 or alt < 0.0:
+            return np.zeros(3)
+        key = (round(float(lat), 4), round(float(lon), 4), round(float(alt), 1), round(float(t), 2))
+        cache = getattr(self, '_wind_cache', {})
+        if getattr(self, '_wind_cache_key', None) != key:
+            U0 = np.asarray(wind_model.wind(float(lat), float(lon), float(alt), float(t)), dtype=float)
+            dU_dt = np.zeros(3)
+            if dt > 1e-6:
+                U1 = np.asarray(wind_model.wind(float(lat), float(lon), float(alt), float(t) + dt), dtype=float)
+                dU_dt = (U1 - U0) / dt
+            eps = 1e-4
+            U_lat = np.asarray(wind_model.wind(float(lat) + eps, float(lon), float(alt), float(t)), dtype=float)
+            U_lon = np.asarray(wind_model.wind(float(lat), float(lon) + eps, float(alt), float(t)), dtype=float)
+            deg2m_lat = 111_132.92
+            deg2m_lon = 111_132.92 * np.cos(np.radians(float(lat)))
+            a_wind = np.zeros(3)
+            for i in range(3):
+                a_wind[i] = dU_dt[i] + v[0] * (U_lon[i] - U0[i]) / (deg2m_lon * eps) + v[1] * (U_lat[i] - U0[i]) / (deg2m_lat * eps)
+            self._wind_cache_key = key
+            self._wind_cache_val = a_wind.tolist()
+        return np.array(self._wind_cache_val)
+
     def set_exo_solar_geomagnetic(self, f107a=None, f107=None, ap=None,
                                   time=None, lat=None, lon=None):
         """Update the exo-atmospheric drivers (solar flux, geomagnetism, geography)."""

@@ -18,12 +18,11 @@ from .target_factory import (
     MU_EARTH,
     R_EARTH,
     _two_body_accel,
-    _ground_altitude,
-    _ecef_to_geodetic,
 )
 from .scenario import EngagementScenario
 from ..interceptors.config import InterceptorConfig, GuidanceConfig
 from ..dynamics.thrust import StageSpec
+from ..dynamics.coordinate_systems import ecef_to_geodetic, geodetic_to_ecef, ground_altitude
 
 
 # ---------------------------------------------------------------------------
@@ -47,46 +46,6 @@ def _earth_rotation_velocity(r_ecef: np.ndarray) -> np.ndarray:
     return np.cross(omega, r_ecef)
 
 
-def geodetic_to_ecef(lat_deg: float, lon_deg: float, alt_m: float = 0.0) -> np.ndarray:
-    """Convert geodetic (WGS84) latitude/longitude/height to ECEF position."""
-    lat = np.radians(lat_deg)
-    lon = np.radians(lon_deg)
-    sin_lat = np.sin(lat)
-    cos_lat = np.cos(lat)
-    sin_lon = np.sin(lon)
-    cos_lon = np.cos(lon)
-
-    N = _WGS84_A / np.sqrt(1.0 - _WGS84_E2 * sin_lat**2)
-    x = (N + alt_m) * cos_lat * cos_lon
-    y = (N + alt_m) * cos_lat * sin_lon
-    z = (N * (1.0 - _WGS84_E2) + alt_m) * sin_lat
-    return np.array([x, y, z])
-
-
-def ecef_to_geodetic(r_ecef: np.ndarray) -> Tuple[float, float, float]:
-    """Convert ECEF position to geodetic (lat_deg, lon_deg, alt_m) using WGS84."""
-    x, y, z = r_ecef
-    lon = np.degrees(np.arctan2(y, x))
-    p = np.sqrt(x**2 + y**2)
-    
-    if p < 1e-6:
-        lat = 90.0 if z > 0 else -90.0
-        return float(lat), float(lon), float(abs(z) - _WGS84_B)
-    
-    # Bowring's method
-    b = _WGS84_B
-    e_prime2 = _WGS84_E2 / (1.0 - _WGS84_E2)
-    theta = np.arctan2(z * _WGS84_A, p * b)
-    lat = np.arctan2(
-        z + e_prime2 * b * np.sin(theta)**3,
-        p - _WGS84_E2 * _WGS84_A * np.cos(theta)**3,
-    )
-    
-    sin_lat = np.sin(lat)
-    N = _WGS84_A / np.sqrt(1.0 - _WGS84_E2 * sin_lat**2)
-    alt = p / np.cos(lat) - N
-    
-    return float(np.degrees(lat)), float(lon), float(alt)
 
 
 def _enu_basis(lat_deg: float, lon_deg: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -140,7 +99,7 @@ def _integrate_3dof(r0, v0, t_max, dt=0.5, use_j2=True,
     
     while t < t_max:
         # Check ground impact FIRST
-        alt = _ground_altitude(r)
+        alt = ground_altitude(r)
         if alt <= 0.0 and t > 1.0:  # Don't trigger at t=0
             hit_ground = True
             break
