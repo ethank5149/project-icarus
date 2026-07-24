@@ -1,9 +1,8 @@
 """Dymos-based RS-28 Sarmat offensive trajectory optimization.
 
 Single-phase boost optimization that minimizes terminal miss distance.
-The optimizer tunes the staged elevation schedule and stage-3 thrust scale
-to hit the DC target.  The resulting optimal thrust-direction profile is
-saved as a precomputed trajectory table for the guidance computer.
+The optimizer tunes the real ``ICBMGuidance`` pitch schedule parameters
+exposed as Dymos parameters.
 """
 
 import numpy as np
@@ -33,9 +32,8 @@ def build_sarmat_trajectory_problem(num_segments=20, order=5, maxiter=200):
     """Assemble the Sarmat boost-phase Dymos trajectory optimization problem.
 
     This is a single-phase problem that optimizes the boost trajectory to
-    minimize the miss distance at burnout.  The optimizer tunes the staged
-    elevation schedule (``el_0``, ``el_1``, ``t_cross``) and stage-3 thrust
-    scale (``T3_scale``) exposed as Dymos parameters.
+    minimize the miss distance at burnout.  The optimizer tunes the real
+    ``ICBMGuidance`` pitch schedule parameters exposed as Dymos parameters.
 
     Parameters
     ----------
@@ -59,7 +57,7 @@ def build_sarmat_trajectory_problem(num_segments=20, order=5, maxiter=200):
     tx = dm.Radau(num_segments=num_segments, order=order)
 
     # ------------------------------------------------------------------
-    # Phase 1: Boost (staged thrust, parameterized pitch schedule)
+    # Phase 1: Boost (staged thrust, energy-based pitch schedule)
     # ------------------------------------------------------------------
     boost = dm.Phase(ode_class=SarmatBoostODE, transcription=tx)
     traj.add_phase("boost", boost)
@@ -81,15 +79,13 @@ def build_sarmat_trajectory_problem(num_segments=20, order=5, maxiter=200):
     boost.add_state("m", rate_source="dm_dt", units="kg",
                     fix_initial=True, val=208100.0)
 
-    # Guidance parameters (optimizer-tunable)
-    boost.add_parameter("el_0", units=None, val=np.radians(45.0),
-                        opt=True, lower=np.radians(15), upper=np.radians(75))
-    boost.add_parameter("el_1", units=None, val=np.radians(25.0),
-                        opt=True, lower=np.radians(15), upper=np.radians(75))
-    boost.add_parameter("t_cross", units="s", val=100.0,
-                        opt=True, lower=5.0, upper=250.0)
-    boost.add_parameter("T3_scale", units=None, val=1.0,
-                        opt=True, lower=0.5, upper=5.0)
+    # Guidance parameters (optimizer-tunable, wired to real ICBMGuidance)
+    boost.add_parameter("pitch_over_start", units="s", val=5.0,
+                        opt=True, lower=3.0, upper=15.0)
+    boost.add_parameter("initial_elevation", units=None, val=np.radians(55.0),
+                        opt=True, lower=np.radians(40), upper=np.radians(75))
+    boost.add_parameter("burnout_vmag", units="m/s", val=6200.0,
+                        opt=True, lower=5500.0, upper=7500.0)
     boost.add_parameter("target_r", units="m", shape=(3,),
                         val=R_TARGET_DC, opt=False)
 
@@ -106,10 +102,9 @@ def build_sarmat_trajectory_problem(num_segments=20, order=5, maxiter=200):
 
     # Feasible initial guesses
     p.set_val("traj.boost.t_duration", 300.0)
-    p.set_val("traj.boost.parameters:el_0", np.radians(45.0))
-    p.set_val("traj.boost.parameters:el_1", np.radians(25.0))
-    p.set_val("traj.boost.parameters:t_cross", 100.0)
-    p.set_val("traj.boost.parameters:T3_scale", 1.0)
+    p.set_val("traj.boost.parameters:pitch_over_start", 5.0)
+    p.set_val("traj.boost.parameters:initial_elevation", np.radians(55.0))
+    p.set_val("traj.boost.parameters:burnout_vmag", 6200.0)
     p.set_val("traj.boost.parameters:target_r", R_TARGET_DC)
 
     return p

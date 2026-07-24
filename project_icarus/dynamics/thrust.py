@@ -134,6 +134,7 @@ class StageSpec:
     inertia: Optional[np.ndarray] = None
     cg: Optional[np.ndarray] = None
     thrust_table: Optional[Callable[[float, float], float]] = None
+    mass_flow: Optional[float] = None
 
 
 class MultiStageThrustModel:
@@ -212,7 +213,14 @@ class MultiStageThrustModel:
         if T <= 0.0:
             return 0.0
         idx = self.stage_index_at(t)
-        return -T / (self.stages[idx].Isp * G0)
+        stage = self.stages[idx]
+        if stage.mass_flow is not None:
+            return stage.mass_flow
+        derived = -T / (stage.Isp * G0)
+        max_allowed = -(stage.wet_mass - stage.dry_mass) / max(stage.burn_time, 1e-9)
+        if abs(derived) > abs(max_allowed):
+            return max_allowed
+        return derived
 
     def separation_for_stage(self, stage_idx: int) -> Optional[StageSeparation]:
         if stage_idx >= len(self.stages):
@@ -248,7 +256,44 @@ class MultiStageThrustModel:
             return None
         for idx in (stage_idx + 1, stage_idx):
             if idx < n:
-                cg = self.stages[idx].cg
-                if cg is not None:
-                    return np.asarray(cg, dtype=float)
+                 cg = self.stages[idx].cg
+                 if cg is not None:
+                     return np.asarray(cg, dtype=float)
         return None
+
+
+def sarmat_stage_specs():
+    """Authoritative RS-28 Sarmat stage specifications.
+
+    Refs: Astronautica RD-274 (4,952 kN), Missile Defense Advocacy (PDU-99),
+    Army Recognition (four RS-99, "over 100 tons thrust").
+    """
+    return [
+        StageSpec(thrust=lambda t: 5.0e6, burn_time=90.0,
+                  wet_mass=140_000.0, dry_mass=11_340.0, Isp=315.0,
+                  mass_flow=1430.0),
+        StageSpec(thrust=lambda t: 1.2e6, burn_time=180.0,
+                  wet_mass=48_000.0, dry_mass=3_600.0, Isp=325.0,
+                  mass_flow=247.0),
+        StageSpec(thrust=lambda t: 1.0e6, burn_time=90.0,
+                  wet_mass=10_100.0, dry_mass=2_160.0, Isp=330.0,
+                  mass_flow=77.2),
+    ]
+
+
+def sarmat_stage_dicts():
+    specs = sarmat_stage_specs()
+    t_cur = 0.0
+    out = []
+    for s in specs:
+        t_start = t_cur
+        t_end = t_cur + s.burn_time
+        out.append({
+            "t_start": t_start,
+            "t_end": t_end,
+            "thrust": float(s.thrust(0.0)),
+            "m_dot": abs(s.mass_flow),
+            "Isp": s.Isp,
+        })
+        t_cur = t_end
+    return out

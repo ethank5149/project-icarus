@@ -14,32 +14,30 @@ from project_icarus.optimization.sarmat_trajectory import (
 
 class TestSarmatTrajectory:
     def test_assembles(self):
-        """The 3-phase Sarmat problem must assemble without crashing."""
+        """The single-phase Sarmat problem must assemble without crashing."""
         warnings.filterwarnings("ignore")
         p = build_sarmat_trajectory_problem(num_segments=8, order=3, maxiter=3)
         assert p is not None
         p.setup()
 
     def test_boost_phase_has_guidance_parameters(self):
-        """Boost phase must expose el_0, el_1, t_cross, T3_scale."""
+        """Boost phase must expose pitch_over_start, initial_elevation, burnout_vmag."""
         warnings.filterwarnings("ignore")
         p = build_sarmat_trajectory_problem(num_segments=8, order=3, maxiter=3)
         p.setup()
         boost = p.model.traj.phases.boost
         param_names = list(boost.parameter_options.keys())
-        for name in ("el_0", "el_1", "t_cross", "T3_scale"):
+        for name in ("pitch_over_start", "initial_elevation", "burnout_vmag"):
             assert name in param_names
 
     def test_phases_linked(self):
-        """All three phases must be linked by state continuity."""
+        """The Dymos problem must have the boost phase."""
         warnings.filterwarnings("ignore")
         p = build_sarmat_trajectory_problem(num_segments=8, order=3, maxiter=3)
         p.setup()
         traj = p.model.traj
         assert hasattr(traj, "phases")
         assert "boost" in dir(traj.phases)
-        assert "midcourse" in dir(traj.phases)
-        assert "terminal" in dir(traj.phases)
 
     def test_runs_without_crashing(self):
         """The optimizer must drive at least a few iterations."""
@@ -47,17 +45,16 @@ class TestSarmatTrajectory:
         p = build_sarmat_trajectory_problem(num_segments=8, order=3, maxiter=3)
         dm = __import__("dymos")
         dm.run_problem(p, run_driver=True, simulate=False, make_plots=False)
-        for ph in ("boost", "midcourse", "terminal"):
-            dur = float(np.asarray(p.get_val(f"traj.{ph}.t_duration")).ravel()[0])
-            assert np.isfinite(dur)
-            assert dur > 0.0
+        dur = float(np.asarray(p.get_val("traj.boost.t_duration")).ravel()[0])
+        assert np.isfinite(dur)
+        assert dur > 0.0
 
     def test_miss_distance_reported(self):
-        """The terminal phase must compute miss_distance at each node."""
+        """The boost phase must compute miss_distance at each node."""
         warnings.filterwarnings("ignore")
         p = build_sarmat_trajectory_problem(num_segments=8, order=3, maxiter=3)
         dm = __import__("dymos")
         dm.run_problem(p, run_driver=True, simulate=False, make_plots=False)
-        miss = np.asarray(p.get_val("traj.terminal.timeseries.miss_distance")).ravel()
+        miss = np.asarray(p.get_val("traj.boost.rhs_all.miss_distance")).ravel()
         assert miss.shape[0] > 0
         assert np.all(np.isfinite(miss))

@@ -58,10 +58,12 @@ class ParameterizedSarmatScenario(SarmatScenario):
         Parameters
         ----------
         params : array-like
-            [burnout_vmag, pitch_over_start, pitch_over_duration,
-             initial_elevation_deg, max_flight_path_angle_deg, gravity_turn_gain]
+            [burnout_vmag, pitch_over_start, initial_elevation_deg]
         """
-        self._opt_params = np.asarray(params, dtype=float)
+        x = np.asarray(params, dtype=float).copy()
+        if len(x) >= 3:
+            x[2] = np.radians(x[2])
+        self._opt_params = x
 
     def _get_guidance(self):
         if self._guidance is None:
@@ -70,19 +72,13 @@ class ParameterizedSarmatScenario(SarmatScenario):
                 launch_ecef=self.r0,
                 burnout_vmag=6800.0,
                 pitch_over_start=5.0,
-                pitch_over_duration=25.0,
-                initial_elevation=np.radians(85.0),
-                max_flight_path_angle=np.radians(75.0),
-                gravity_turn_gain=0.02,
+                initial_elevation=np.radians(55.0),
                 use_j2=self.use_j2,
             )
         if self._opt_params is not None:
             (self._guidance.burnout_vmag,
              self._guidance.pitch_over_start,
-             self._guidance.pitch_over_duration,
-             self._guidance.initial_elevation,
-             self._guidance.max_flight_path_angle,
-             self._guidance.gravity_turn_gain) = self._opt_params
+             self._guidance.initial_elevation) = self._opt_params
         return self._guidance
 
     def _current_thrust_dir(self, t, r, v):
@@ -97,8 +93,7 @@ def compute_miss_distance(params):
     Parameters
     ----------
     params : array-like
-        [burnout_vmag, pitch_over_start, pitch_over_duration,
-         initial_elevation_deg, max_flight_path_angle_deg, gravity_turn_gain]
+        [burnout_vmag, pitch_over_start, initial_elevation_deg]
 
     Returns
     -------
@@ -132,14 +127,11 @@ def optimize_sarmat_trajectory(maxiter=200, ftol=1.0):
     -------
     result : scipy.optimize.OptimizeResult
     """
-    x0 = np.array([6200.0, 5.0, 25.0, 85.0, 75.0, 0.02])
+    x0 = np.array([6200.0, 5.0, 55.0])
     bounds = [
-        (5000.0, 8000.0),
-        (3.0, 30.0),
-        (10.0, 60.0),
-        (70.0, 90.0),
-        (30.0, 85.0),
-        (0.005, 0.1),
+        (5500.0, 7500.0),
+        (3.0, 15.0),
+        (np.radians(40), np.radians(75)),
     ]
 
     def objective(x):
@@ -161,7 +153,7 @@ if __name__ == "__main__":
     print("=" * 60)
 
     print("\nTesting default parameters...")
-    default_params = [6200.0, 5.0, 25.0, 85.0, 75.0, 0.02]
+    default_params = [6200.0, 5.0, 55.0]
     default_miss = compute_miss_distance(default_params)
     print(f"Default miss: {default_miss/1000:.1f} km")
 
@@ -177,10 +169,7 @@ if __name__ == "__main__":
     print(f"Optimal parameters:")
     print(f"  burnout_vmag = {result.x[0]:.0f} m/s")
     print(f"  pitch_over_start = {result.x[1]:.1f} s")
-    print(f"  pitch_over_duration = {result.x[2]:.1f} s")
-    print(f"  initial_elevation = {result.x[3]:.1f} deg")
-    print(f"  max_flight_path_angle = {result.x[4]:.1f} deg")
-    print(f"  gravity_turn_gain = {result.x[5]:.4f}")
+    print(f"  initial_elevation = {np.degrees(result.x[2]):.1f} deg")
 
     if result.fun < 100.0:
         print("\nSUCCESS: Miss distance < 100m achieved!")

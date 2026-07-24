@@ -10,7 +10,8 @@ from ..guidance.terminal_guidance import TerminalGuidance
 from ..aero.aero_analytical import blended_aero
 from ..dynamics.atmosphere import Atmosphere
 from ..dynamics.gravity import gravity_inertial
-from ..dynamics.thrust import StageSpec, MultiStageThrustModel, StageSeparation
+from ..dynamics.thrust import StageSpec, MultiStageThrustModel, StageSeparation, sarmat_stage_dicts
+from ..guidance.icbm_guidance import ICBMGuidance
 
 try:
     from ..dynamics.gravity import gravity_inertial_jit, GRAVITY_JIT_AVAILABLE
@@ -1545,11 +1546,7 @@ class SarmatScenario(FOBSScenario):
     # - Stage 3: Four RS-99 engines, "over 100 tons thrust" (~1,000+ kN)
     # Refs: Astronautica RD-274 (4,952 kN), Missile Defense Advocacy (PDU-99),
     #       Army Recognition ("four engines ... over 100 tons thrust")
-    _SARMAT_STAGES = [
-        {"t_start": 0.0,   "t_end": 90.0,  "thrust": 5.0e6,   "m_dot": 1430.0},
-        {"t_start": 90.0,  "t_end": 270.0, "thrust": 1.2e6,   "m_dot": 247.0},
-        {"t_start": 270.0, "t_end": 360.0, "thrust": 1.0e6,   "m_dot": 88.0},
-    ]
+    _SARMAT_STAGES = sarmat_stage_dicts()
 
     def __post_init__(self):
         super().__post_init__()
@@ -1576,21 +1573,12 @@ class SarmatScenario(FOBSScenario):
         self._era5_loaded = False
         self._era5_interpolator = None
 
-    def _init_icbm_guidance(self):
-        from ..guidance.precomputed_trajectory import SarmatTrajectoryLibrary
-
-        self._target_ecef = _geodetic_to_ecef_simple(
-            self._TARGET_LAT, self._TARGET_LON, self._TARGET_ALT
-        )
-
-        library = SarmatTrajectoryLibrary(launch_ecef=self.r0)
-        self._profile = library.get_or_compute(
-            target_ecef=self._target_ecef,
-            profile_name="standard",
-            stages=self._SARMAT_STAGES,
-            mass_initial=self._initial_mass(),
-            cd=self.cd,
-            area=self.area,
+        self._guidance = ICBMGuidance(
+            target_ecef=self._aim_point if hasattr(self, '_aim_point') else _geodetic_to_ecef_simple(
+                self._TARGET_LAT, self._TARGET_LON, self._TARGET_ALT
+            ),
+            launch_ecef=self.r0,
+            use_j2=self.use_j2,
         )
 
     def _ensure_era5(self):
@@ -1634,9 +1622,7 @@ class SarmatScenario(FOBSScenario):
         return 208100.0
 
     def _current_thrust_dir(self, t, r, v):
-        if not hasattr(self, '_profile'):
-            self._init_icbm_guidance()
-        return self._profile.thrust_direction(t, r, v)
+        return self._guidance.thrust_direction(r, v, t)
 
     def _boost_guidance_correction(self, t, r, v):
         """Deprecated: guidance now applied directly via _current_thrust_dir."""

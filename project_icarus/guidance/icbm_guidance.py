@@ -255,10 +255,7 @@ class ICBMGuidance:
         launch_ecef: np.ndarray,
         burnout_vmag: float = 6200.0,
         pitch_over_start: float = 5.0,
-        pitch_over_duration: float = 25.0,
-        initial_elevation: float = np.radians(85.0),
-        max_flight_path_angle: float = np.radians(75.0),
-        gravity_turn_gain: float = 0.02,
+        initial_elevation: float = np.radians(55.0),
         use_j2: bool = True,
     ):
         """
@@ -269,21 +266,11 @@ class ICBMGuidance:
         launch_ecef : ndarray
             Launch position in ECEF (m).
         burnout_vmag : float
-            Desired velocity magnitude at thrust end (m/s).  For a 7000 km
-            ICBM trajectory, typical burnout speed is 6.5-7.5 km/s.
+            Desired velocity magnitude at thrust end (m/s).
         pitch_over_start : float
             Time after launch when pitch-over begins (s).
-        pitch_over_duration : float
-            Duration of the pitch-over maneuver (s).
         initial_elevation : float
-            Launch elevation (rad) above local horizontal.  Typically 85-90°
-            for silo launch (near-vertical).
-        max_flight_path_angle : float
-            Maximum flight path angle during pitch-over (rad).  Limits
-            how close to vertical the trajectory remains.
-        gravity_turn_gain : float
-            Gain for aligning thrust with velocity during gravity turn.
-            Higher values = more aggressive alignment.
+            Launch elevation (rad) above local horizontal after silo egress.
         use_j2 : bool
             Whether guidance computations include J2 perturbations.
         """
@@ -291,43 +278,29 @@ class ICBMGuidance:
         self.launch = np.asarray(launch_ecef, dtype=float)
         self.burnout_vmag = burnout_vmag
         self.pitch_over_start = pitch_over_start
-        self.pitch_over_duration = pitch_over_duration
         self.initial_elevation = initial_elevation
-        self.max_flight_path_angle = max_flight_path_angle
-        self.gravity_turn_gain = gravity_turn_gain
         self.use_j2 = use_j2
 
-        # Compute launch azimuth from great-circle path to target
         self.azimuth = np.radians(_great_circle_azimuth(self.launch, self.target))
 
-        # Launch-site ENU basis
         lat0, lon0, _ = _ecef_to_geodetic(self.launch)
         self._east, self._north, self._up = _enu_basis(lat0, lon0)
 
-        # Great-circle horizontal direction in ECEF
         self._gc_horiz = (
             np.cos(self.azimuth) * self._north + np.sin(self.azimuth) * self._east
         )
-        # Normalize GC direction
         gc_norm = np.linalg.norm(self._gc_horiz)
         if gc_norm > 1e-9:
             self._gc_horiz = self._gc_horiz / gc_norm
         else:
             self._gc_horiz = np.array([0.0, 0.0, 0.0])
 
-        # Target flight path angle at burnout (derived from range tables)
-        # For ~7000 km range: 15-20° FPA at ~6.8 km/s burnout speed
         range_km = np.linalg.norm(self.target - self.launch) / 1000.0
         self._final_gamma = np.radians(np.clip(20.0 - 0.3 * (range_km - 7000.0) / 1000.0, 12.0, 25.0))
 
-        # INS for state estimation (used in advanced closed-loop variants)
         self.ins: Optional[InertialNavigationSystem] = None
 
         # Star-sighting correction state
-        self._last_star_sighting = -1e9
-        self._star_sighting_interval = 900.0  # s (15 min for long-range ICBM)
-        self._position_correction = np.zeros(3)
-        self._velocity_correction = np.zeros(3)
 
     def reset(self, launch_ecef: np.ndarray = None):
         if launch_ecef is not None:
@@ -340,9 +313,6 @@ class ICBMGuidance:
             gc_norm = np.linalg.norm(self._gc_horiz)
             if gc_norm > 1e-9:
                 self._gc_horiz = self._gc_horiz / gc_norm
-        self._position_correction = np.zeros(3)
-        self._velocity_correction = np.zeros(3)
-        self._last_star_sighting = -1e9
         if self.ins is not None:
             self.ins.r = self.launch.copy()
             self.ins.v = np.zeros(3)
@@ -374,12 +344,10 @@ class ICBMGuidance:
         lat, lon, _ = _ecef_to_geodetic(r)
         _, _, up = _enu_basis(lat, lon)
         v_dir = v / vmag
-        gamma = np.arcsin(np.clip(np.dot(v_dir, up), -1.0, 1.0))
 
         if t < self.pitch_over_start:
-            return np.pi / 2.0  # Vertical ascent
+            return np.pi / 2.0
 
-        # Use specific orbital energy as the independent variable
         rmag = np.linalg.norm(r)
         eps = 0.5 * vmag**2 - MU_EARTH / max(rmag, 1e-6)
         eps_min = -MU_EARTH / max(rmag, 1e-6)
@@ -387,113 +355,44 @@ class ICBMGuidance:
         eps_norm = (eps - eps_min) / max(eps_max - eps_min, 1e-9)
         eps_norm = float(np.clip(eps_norm, 0.0, 1.0))
 
-        # Flat trajectory profile: turn to horizontal quickly
-        if eps_norm < 0.02:
-            return np.pi / 2.0  # Vertical to clear silo
-        elif eps_norm < 0.08:
-            # Rapid pitch-over from vertical to 25° (2-8% energy)
-            frac = (eps_norm - 0.02) / 0.06
+        if eps_norm < 0.001:
+            return np.pi / 2.0
+        elif eps_norm < 0.05:
+            frac = (eps_norm - 0.001) / 0.049
             frac = 0.5 * (1.0 - np.cos(np.pi * frac))
-            return float(np.pi / 2.0 - frac * (np.pi / 2.0 - np.radians(25.0)))
-        elif eps_norm < 0.25:
-            # Continue flattening to 12° (8-25% energy)
-            frac = (eps_norm - 0.08) / 0.17
+            return float(self.initial_elevation - frac * (self.initial_elevation - np.radians(25.0)))
+        elif eps_norm < 0.40:
+            frac = (eps_norm - 0.05) / 0.35
             return float(np.radians(25.0) - frac * np.radians(13.0))
-        elif eps_norm < 0.60:
-            # Gradual flattening to 8° (25-60% energy)
-            frac = (eps_norm - 0.25) / 0.35
-            return float(np.radians(12.0) - frac * np.radians(4.0))
         else:
-            # Final approach to 5° at burnout (60-100% energy)
-            frac = (eps_norm - 0.60) / 0.40
-            return float(np.radians(8.0) - frac * np.radians(3.0))
+            return float(np.arcsin(np.clip(np.dot(v_dir, up), -1.0, 1.0)))
 
     def thrust_direction(self, r: np.ndarray, v: np.ndarray, t: float) -> np.ndarray:
         """Compute the commanded thrust direction vector in ECEF.
 
-        Uses the pre-computed great-circle azimuth and a time-based pitch schedule
-        that transitions from vertical to near-horizontal thrust. This matches
-        how real ICBMs operate: azimuth computed at launch, pitch schedule pre-programmed.
+        Uses the pre-computed great-circle azimuth and an energy-based pitch
+        schedule that transitions from vertical to the gravity-turn flight
+        path. This matches how real ICBMs operate: azimuth computed at
+        launch, pitch schedule energy-based.
         """
         r = np.asarray(r, dtype=float)
         v = np.asarray(v, dtype=float)
         lat, lon, _ = _ecef_to_geodetic(r)
         _, _, up = _enu_basis(lat, lon)
 
-        # Use fixed great-circle direction (azimuth computed at launch)
         gc_horiz = self._gc_horiz
 
-        # Time-based pitch schedule
-        if t < self.pitch_over_start:
-            gamma = np.pi / 2.0
-        elif t < self.pitch_over_start + self.pitch_over_duration:
-            frac = (t - self.pitch_over_start) / self.pitch_over_duration
-            frac = 0.5 * (1.0 - np.cos(np.pi * frac))
-            gamma = np.pi / 2.0 - frac * (np.pi / 2.0 - self._final_gamma)
-        else:
-            # Gravity turn: thrust aligned with velocity (zero angle of attack)
-            vmag = np.linalg.norm(v)
-            if vmag > 1e-6:
-                v_dir = v / vmag
-                v_horiz = v_dir - np.dot(v_dir, up) * up
-                v_horiz_norm = np.linalg.norm(v_horiz)
-                if v_horiz_norm > 1e-6:
-                    v_horiz = v_horiz / v_horiz_norm
-                    # Blend current velocity direction with target azimuth
-                    blend = min(1.0, self.gravity_turn_gain * max(0.0, t - self.pitch_over_start))
-                    horiz_dir = (1.0 - blend) * v_horiz + blend * gc_horiz
-                    horiz_norm = np.linalg.norm(horiz_dir)
-                    if horiz_norm > 1e-6:
-                        horiz_dir = horiz_dir / horiz_norm
-                    return horiz_dir
-                return gc_horiz
-            return np.cos(self._final_gamma) * gc_horiz + np.sin(self._final_gamma) * up
-        
+        gamma = self._desired_flight_path_angle(r, v, t)
+
         thrust_dir = np.cos(gamma) * gc_horiz + np.sin(gamma) * up
-        
-        # Normalize
+
         norm = np.linalg.norm(thrust_dir)
         if norm > 1e-9:
             thrust_dir = thrust_dir / norm
         else:
             thrust_dir = up.copy()
-        
+
         return thrust_dir
-
-    def _desired_burnout_velocity(self) -> np.ndarray:
-        """Compute the desired burnout velocity from suborbital targeting.
-
-        This is computed ONCE at pre-launch and stored.  The guidance
-        computer uses this as the reference for the entire boost phase.
-        """
-        if not hasattr(self, '_v_burnout_des'):
-            # Time of flight for 7000 km range (suborbital)
-            tof = 1600.0  # seconds
-
-            # Approximate burnout position: 2500 km along great-circle path
-            # This is approximate; real ICBMs use precise trajectory optimization
-            r_burnout_est = self.launch + self._gc_horiz * 2_500_000.0
-            r_burnout_est_mag = np.linalg.norm(r_burnout_est)
-            if r_burnout_est_mag > 1e-6:
-                r_burnout_est = r_burnout_est / r_burnout_est_mag * (R_EARTH + 250.0e3)
-
-            # Solve for burnout velocity that reaches target
-            lambert = BurnoutTargeting()
-            try:
-                v_burnout = lambert.required_burnout_velocity(
-                    self.launch, self.target, tof, burnout_alt=250.0e3
-                )
-                self._v_burnout_des = v_burnout
-            except Exception:
-                # Fallback: compute from energy requirement
-                # For 7000 km range, need ~6.8 km/s at ~18° elevation
-                vmag = 6800.0
-                gamma = np.radians(18.0)
-                self._v_burnout_des = (
-                    np.cos(gamma) * self._gc_horiz + np.sin(gamma) * self._up
-                ) * vmag
-
-        return self._v_burnout_des
 
     def azimuth_error(self, r: np.ndarray, v: np.ndarray) -> float:
         """Compute cross-range error from desired great-circle azimuth (rad)."""
@@ -511,25 +410,6 @@ class ICBMGuidance:
         # Cross-range is the sine of the angle between velocity azimuth and desired azimuth
         cross = np.dot(v_horiz, self._gc_horiz)
         return float(np.arccos(np.clip(cross, -1.0, 1.0)))
-
-    def update_star_sighting(self, position_correction: np.ndarray,
-                              velocity_correction: np.ndarray):
-        """Apply a star-sighting correction to the INS (periodic update)."""
-        self._position_correction = np.asarray(position_correction, dtype=float)
-        self._velocity_correction = np.asarray(velocity_correction, dtype=float)
-        self._last_star_sighting = 0.0
-        if self.ins is not None:
-            self.ins.r += self._position_correction
-            self.ins.v += self._velocity_correction
-
-    def initialize_ins(self, r0: np.ndarray, v0: np.ndarray):
-        """Initialize the INS at launch."""
-        self.ins = InertialNavigationSystem(r0, v0, use_j2=self.use_j2)
-
-    def update_ins(self, f_body: np.ndarray, omega_body: np.ndarray, dt: float):
-        """Update the INS with latest accelerometer/gyro measurements."""
-        if self.ins is not None:
-            self.ins.propagate(f_body, omega_body, dt)
 
 
 class BurnoutTargeting:

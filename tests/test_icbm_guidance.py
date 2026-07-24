@@ -68,10 +68,7 @@ class TestICBMGuidance:
             launch_ecef=R0_KOZELSK,
             burnout_vmag=6800.0,
             pitch_over_start=5.0,
-            pitch_over_duration=25.0,
-            initial_elevation=np.radians(88.0),
-            max_flight_path_angle=np.radians(70.0),
-            gravity_turn_gain=0.03,
+            initial_elevation=np.radians(55.0),
             use_j2=True,
         )
 
@@ -92,7 +89,9 @@ class TestICBMGuidance:
     def test_pitch_over_occurs(self):
         """Thrust should pitch over from vertical toward horizontal."""
         d0 = self.guidance.thrust_direction(R0_KOZELSK, np.zeros(3), 0.0)
-        d10 = self.guidance.thrust_direction(R0_KOZELSK, np.array([100.0, 200.0, 300.0]), 10.0)
+        r_boosted = R0_KOZELSK + np.array([0.0, 0.0, 50_000.0])
+        v_boosted = np.array([800.0, 1200.0, 400.0])
+        d10 = self.guidance.thrust_direction(r_boosted, v_boosted, 10.0)
         
         lat, lon, _ = _ecef_to_geodetic(R0_KOZELSK)
         _, _, up = _enu_basis(lat, lon)
@@ -103,6 +102,19 @@ class TestICBMGuidance:
         assert fpa0 > 80.0, f"Initial FPA should be near vertical, got {fpa0:.1f}°"
         assert fpa10 < fpa0, f"FPA should decrease after pitch-over, got {fpa10:.1f}° vs {fpa0:.1f}°"
 
+    def test_pitch_never_near_vertical_after_20s(self):
+        """After pitch-over, thrust should not remain near-vertical."""
+        r_high = R0_KOZELSK + np.array([0.0, 0.0, 200_000.0])
+        v_fast = np.array([1000.0, 2000.0, 500.0])
+        lat, lon, _ = _ecef_to_geodetic(r_high)
+        _, _, up = _enu_basis(lat, lon)
+
+        for t in [25.0, 50.0, 100.0, 200.0, 300.0]:
+            d = self.guidance.thrust_direction(r_high, v_fast, t)
+            vertical_component = np.dot(d, up)
+            assert vertical_component < 0.5, \
+                f"Thrust too vertical at t={t:.1f}: vertical={vertical_component:.3f}"
+
     def test_azimuth_toward_target(self):
         """Thrust horizontal component should point toward target azimuth."""
         d = self.guidance.thrust_direction(
@@ -111,13 +123,11 @@ class TestICBMGuidance:
         lat, lon, _ = _ecef_to_geodetic(R0_KOZELSK)
         east, north, up = _enu_basis(lat, lon)
         
-        # Remove vertical component
         d_horiz = d - np.dot(d, up) * up
         d_horiz_norm = np.linalg.norm(d_horiz)
         if d_horiz_norm > 1e-6:
             d_horiz = d_horiz / d_horiz_norm
             
-            # Should have component in target azimuth direction
             az = np.radians(_great_circle_azimuth(R0_KOZELSK, R_TARGET_DC))
             target_horiz = np.cos(az) * north + np.sin(az) * east
             target_horiz = target_horiz / np.linalg.norm(target_horiz)
@@ -137,11 +147,9 @@ class TestInertialNavigationSystem:
             v0=np.array([0.0, 7500.0, 0.0]),
         )
         
-        # Propagate for 10s with zero specific force and angular rate
         for _ in range(100):
             ins.propagate(np.zeros(3), np.zeros(3), 0.1)
         
-        # Position should have changed by ~velocity * time
         expected_dr = 7500.0 * 10.0
         actual_dr = np.linalg.norm(ins.r - np.array([6371e3, 0.0, 0.0]))
         assert np.isclose(actual_dr, expected_dr, rtol=1e-2), \
@@ -172,21 +180,18 @@ class TestSarmatScenario:
             use_j2=True,
         )
 
-    def test_scenario_initializes_guidance(self):
-        """Scenario should initialize precomputed trajectory profile on demand."""
-        assert not hasattr(self.scenario, '_profile')
-        self.scenario._init_icbm_guidance()
-        assert hasattr(self.scenario, '_profile')
-        assert self.scenario._profile is not None
+    def test_scenario_has_guidance(self):
+        """Scenario should have a real ICBMGuidance instance."""
+        assert hasattr(self.scenario, '_guidance')
+        assert self.scenario._guidance is not None
+        assert isinstance(self.scenario._guidance, ICBMGuidance)
 
     def test_thrust_direction_valid(self):
         """Thrust direction should be valid at all times during boost."""
-        self.scenario._init_icbm_guidance()
-
         for t in [0.0, 5.0, 10.0, 50.0, 100.0, 200.0, 250.0, 300.0]:
             r = self.scenario.propagate(t)[:3]
             v = self.scenario.propagate(t)[3:6]
-            d = self.scenario._profile.thrust_direction(t, r, v)
+            d = self.scenario._guidance.thrust_direction(r, v, t)
 
             assert np.all(np.isfinite(d)), f"Thrust direction invalid at t={t}"
             assert np.isclose(np.linalg.norm(d), 1.0, rtol=1e-6), \

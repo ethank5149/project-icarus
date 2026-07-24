@@ -2,8 +2,10 @@ import numpy as np
 import openmdao.api as om
 from ...dynamics.eom_6dof import EOM6DOF
 from ...aero.aero_analytical import blended_aero
-from ...dynamics.thrust import StageSpec, MultiStageThrustModel
-from ...scenarios.target_factory import _ecef_to_geodetic, _enu_basis
+from ...dynamics.thrust import StageSpec, MultiStageThrustModel, sarmat_stage_specs
+from ...guidance.icbm_guidance import ICBMGuidance
+from ...scenarios.target_factory import _ecef_to_geodetic, _enu_basis, _geodetic_to_ecef_simple
+from ...reference.surface_elevation import get_surface_elevation
 
 R_EARTH = 6371e3
 
@@ -13,13 +15,14 @@ class SarmatBoostODE(om.ExplicitComponent):
 
     Uses the existing ``EOM6DOF`` for aero/gravity/rotational dynamics and
     ``MultiStageThrustModel`` for staged thrust and mass tracking.  The
-    guidance parameters ``el_0``, ``el_1``, ``t_cross``, and ``T3_scale``
-    are exposed as Dymos parameters so the optimizer can tune the pitch
-    schedule and stage-3 thrust level to minimize terminal miss distance.
+    guidance parameters ``pitch_over_start``, ``initial_elevation``, and
+    ``burnout_vmag`` are exposed as Dymos parameters so the optimizer can
+    tune the real ``ICBMGuidance`` pitch schedule to minimize terminal miss
+    distance.
 
     States:  r (3), v (3), q (4), omega (3), m (1)
-    Controls: none (thrust direction is parameterized)
-    Parameters: el_0, el_1, t_cross, T3_scale, target_r
+    Controls: none (thrust direction is parameterized via ICBMGuidance)
+    Parameters: pitch_over_start, initial_elevation, burnout_vmag, target_r
     """
 
     def initialize(self):
@@ -42,10 +45,9 @@ class SarmatBoostODE(om.ExplicitComponent):
 
         # Guidance / vehicle parameters (optimizer-tunable).
         # Dymos passes these as static inputs: shape (nn,) with all values equal.
-        self.add_input("el_0", val=np.full(nn, np.radians(45.0)))
-        self.add_input("el_1", val=np.full(nn, np.radians(25.0)))
-        self.add_input("t_cross", val=np.full(nn, 100.0))
-        self.add_input("T3_scale", val=np.full(nn, 1.0))
+        self.add_input("pitch_over_start", val=np.full(nn, 5.0))
+        self.add_input("initial_elevation", val=np.full(nn, np.radians(55.0)))
+        self.add_input("burnout_vmag", val=np.full(nn, 6200.0))
         # Fixed target position in ECEF
         self.add_input("target_r", val=np.zeros((nn, 3)))
 
@@ -61,25 +63,29 @@ class SarmatBoostODE(om.ExplicitComponent):
         # use_cython=False ensures OpenMDAO complex-step derivatives work
         self.eom = EOM6DOF(boundary_alt=self.options["boundary_alt"], use_cython=False)
 
-        # RS-28 Sarmat multi-stage thrust model (authoritative source data):
-        # - Stage 1: PDU-99 derived from RD-274 (~4,952 kN, 90s burn)
-        # - Stage 2: RD-250 class (~1,200 kN, 180s burn)
-        # - Stage 3: Four RS-99 engines, "over 100 tons thrust" (~1,000+ kN, 90s burn)
-        # Refs: Astronautica RD-274 (4,952 kN), Missile Defense Advocacy (PDU-99),
-        #       Army Recognition ("four engines ... over 100 tons thrust")
-        self._thrust_model = MultiStageThrustModel([
-            StageSpec(thrust=lambda t: 5.0e6, burn_time=90.0,
-                      wet_mass=140000.0, dry_mass=11340.0, Isp=315.0),
-            StageSpec(thrust=lambda t: 1.2e6, burn_time=180.0,
-                      wet_mass=48000.0, dry_mass=3600.0, Isp=325.0),
-            StageSpec(thrust=lambda t: 1.0e6, burn_time=90.0,
-                      wet_mass=10100.0, dry_mass=2160.0, Isp=330.0),
-        ])
+        # Authoritative RS-28 Sarmat multi-stage thrust model
+        self._thrust_model = MultiStageThrustModel(sarmat_stage_specs())
 
         self._surrogate_model = None
         self._geometry_key = self.options["geometry_key"]
         self._target_lat = self.options["target_lat"]
         self._target_lon = self.options["target_lon"]
+
+        # Real ICBM guidance instance (single source of truth for thrust direction)
+        target_lat = float(self._target_lat)
+        target_lon = float(self._target_lon)
+        target_elev = get_surface_elevation(target_lat, target_lon)
+        launch_lat = 54.07
+        launch_lon = 35.73
+        launch_elev = get_surface_elevation(launch_lat, launch_lon)
+        self._guidance = ICBMGuidance(
+            target_ecef=_geodetic_to_ecef_simple(target_lat, target_lon, target_elev),
+            launch_ecef=_geodetic_to_ecef_simple(launch_lat, launch_lon, launch_elev),
+            burnout_vmag=6200.0,
+            pitch_over_start=5.0,
+            initial_elevation=np.radians(55.0),
+            use_j2=True,
+        )
 
         self.declare_partials('*', '*', method='fd')
 
@@ -92,36 +98,6 @@ class SarmatBoostODE(om.ExplicitComponent):
                 pass
         return self._surrogate_model
 
-    @staticmethod
-    def _compute_thrust_direction(t, r, v, el_0, el_1, t_cross, target_r):
-        """Onboard guidance: staged elevation + great-circle azimuth.
-
-        Mirrors the logic in ``SarmatScenario._current_thrust_dir`` but
-        parameterized by Dymos design variables instead of hard-coded values.
-        """
-        to_target = target_r - r
-        to_target_dir = to_target / max(np.linalg.norm(to_target), 1e-9)
-
-        lat, lon, _ = _ecef_to_geodetic(r)
-        east, north, up = _enu_basis(lat, lon)
-
-        gc_horiz = to_target_dir - np.dot(to_target_dir, up) * up
-        gc_horiz_norm = np.linalg.norm(gc_horiz)
-        if gc_horiz_norm > 1e-6:
-            gc_horiz = gc_horiz / gc_horiz_norm
-        else:
-            gc_horiz = np.array([0.0, 0.0, 0.0])
-
-        if t < 5.0:
-            return up
-
-        # Linear staged elevation from el_0 to el_1 between t=5 and t_cross
-        frac = np.clip((t - 5.0) / max(t_cross - 5.0, 1.0), 0.0, 1.0)
-        el = el_0 + frac * (el_1 - el_0)
-        el = np.clip(el, np.radians(15.0), np.radians(75.0))
-
-        return np.cos(el) * gc_horiz + np.sin(el) * up
-
     def compute(self, inputs, outputs):
         nn = self.options["num_nodes"]
         r = inputs["r"]
@@ -132,11 +108,14 @@ class SarmatBoostODE(om.ExplicitComponent):
         t = inputs["time"]
 
         # Parameters are static (same across all nodes); read from index 0
-        el_0 = float(inputs["el_0"][0])
-        el_1 = float(inputs["el_1"][0])
-        t_cross = float(inputs["t_cross"][0])
-        T3_scale = float(inputs["T3_scale"][0])
+        pitch_over_start = float(inputs["pitch_over_start"][0])
+        initial_elevation = float(inputs["initial_elevation"][0])
+        burnout_vmag = float(inputs["burnout_vmag"][0])
         target_r = inputs["target_r"][0]
+
+        self._guidance.pitch_over_start = pitch_over_start
+        self._guidance.initial_elevation = initial_elevation
+        self._guidance.burnout_vmag = burnout_vmag
 
         boundary_alt = self.options["boundary_alt"]
         gpr = self._get_surrogate()
@@ -158,15 +137,13 @@ class SarmatBoostODE(om.ExplicitComponent):
             # EOM6DOF returns aero + gravity + quaternion + rotational dynamics
             derivs = self.eom.compute(t[i], state, surrogate)
 
-            # Thrust magnitude from multi-stage model (with T3 scaling)
-            T_mag = self._thrust_model.thrust(t[i], state) * T3_scale
-            # Mass rate from the underlying stage (unscaled Isp-based)
+            # Thrust magnitude from multi-stage model (authoritative stage specs)
+            T_mag = self._thrust_model.thrust(t[i], state)
+            # Mass rate from the underlying stage (explicit mass_flow or Isp-based clamp)
             dm_dt = self._thrust_model.mass_rate(t[i], state)
 
-            # Thrust direction from parameterized guidance
-            thrust_dir = self._compute_thrust_direction(
-                t[i], r[i], v[i], el_0, el_1, t_cross, target_r
-            )
+            # Thrust direction from real ICBM guidance
+            thrust_dir = self._guidance.thrust_direction(r[i], v[i], t[i])
             a_thrust = (T_mag / max(float(m[i]), 1e-6)) * thrust_dir
 
             outputs["dr_dt"][i] = derivs["r"]
