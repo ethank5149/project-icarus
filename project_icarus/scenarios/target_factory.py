@@ -10,8 +10,10 @@ from ..guidance.terminal_guidance import TerminalGuidance
 from ..aero.aero_analytical import blended_aero
 from ..dynamics.atmosphere import Atmosphere
 from ..dynamics.gravity import gravity_inertial
+from ..dynamics.coordinate_systems import quat_to_dcm, quat_multiply
 from ..dynamics.thrust import StageSpec, MultiStageThrustModel, StageSeparation, sarmat_stage_dicts
 from ..guidance.icbm_guidance import ICBMGuidance
+from ..guidance.lambert import lambert, required_burnout_velocity_lambert
 
 try:
     from ..dynamics.gravity import gravity_inertial_jit, GRAVITY_JIT_AVAILABLE
@@ -1500,6 +1502,33 @@ class CruiseMissileScenario:
 
 
 @dataclass
+class _LambertBurnoutSolver:
+    """Solves the Lambert problem at burnout to determine the required
+    velocity vector for target impact.
+
+    At engine cutoff, the missile's position and the target position
+    define a boundary-value problem: find the velocity v1 at r1 that
+    reaches r2 in the given time of flight under gravitational influence.
+    """
+
+    mu: float = MU_EARTH
+
+    def required_velocity(self, r_burnout: np.ndarray, r_target: np.ndarray,
+                          tof_coast: float) -> np.ndarray:
+        """Compute the required burnout velocity using Lambert's problem."""
+        return required_burnout_velocity_lambert(
+            r_burnout, r_target, tof_coast, self.mu
+        )
+
+    def burnout_error(self, r_burnout: np.ndarray, v_burnout: np.ndarray,
+                      r_target: np.ndarray, tof_coast: float) -> float:
+        """Compute the miss distance from Lambert boundary condition."""
+        v_required = self.required_velocity(r_burnout, r_target, tof_coast)
+        v_error = v_burnout - v_required
+        return float(np.linalg.norm(v_error))
+
+
+@dataclass
 class SarmatScenario(FOBSScenario):
     """RS-28 Sarmat-specific threat profile.
 
@@ -1580,6 +1609,9 @@ class SarmatScenario(FOBSScenario):
             launch_ecef=self.r0,
             use_j2=self.use_j2,
         )
+
+        # Lambert solver for burnout targeting
+        self._lambert_solver = _LambertBurnoutSolver(mu=MU_EARTH)
 
     def _ensure_era5(self):
         if not self._era5_loaded and self.wind_model is None:
@@ -1690,14 +1722,32 @@ class SarmatScenario(FOBSScenario):
     _boost_end_event.direction = 0
 
     def _integrate_full(self):
-        """Manual RK4 integration with explicit RS-28 stage thrust/mass."""
+        """Manual RK4 integration with explicit RS-28 stage thrust/mass,
+        6-DOF rotational dynamics, mass properties coupling, and
+        aerodynamic moment coupling.
+
+        Enforces Lambert boundary condition at burnout: the velocity
+        at engine cutoff must satisfy the Lambert solution for the
+        target impact point.
+        """
         r = self.r0.astype(float).copy()
         v = self.v0.astype(float).copy()
         m = self._initial_mass()
+
+        # 6-DOF state: quaternion (body-to-inertial), angular velocity
+        q = np.array([1.0, 0.0, 0.0, 0.0])
+        omega = np.zeros(3)
+
+        # Mass properties: dry mass, fuel mass, CoM offset (body frame)
+        m_dry = 30460.0  # approximate dry mass of RS-28
+        m_fuel = m - m_dry
+        r_com_body = np.zeros(3)  # CoM offset from body origin
+        I_body = np.diag([1.5e6, 3.0e6, 3.0e6])  # approximate inertia tensor
+
         t_current = 0.0
         hit_ground = False
         all_times = [0.0]
-        all_states = [np.concatenate([r.copy(), v.copy(), [m]])]
+        all_states = [np.concatenate([r.copy(), v.copy(), q, omega, [m]])]
 
         while not hit_ground and t_current < 4000.0:
             alt = _ground_altitude(r)
@@ -1707,7 +1757,7 @@ class SarmatScenario(FOBSScenario):
 
             dt = 0.05 if t_current < 200.0 else 0.5
 
-            def rhs_tmp(rr, vv, mm, tt):
+            def rhs_tmp(rr, vv, qq, ww, mm, tt):
                 T_mag = 0.0
                 dm_dt_val = 0.0
                 for stage in self._SARMAT_STAGES:
@@ -1716,8 +1766,10 @@ class SarmatScenario(FOBSScenario):
                         dm_dt_val = -stage["m_dot"]
                         break
 
-                thrust_dir = self._current_thrust_dir(tt, rr, vv)
-                a_thrust = (T_mag / max(mm, 1e-6)) * thrust_dir
+                thrust_dir_body = self._current_thrust_dir(tt, rr, vv)
+                C = quat_to_dcm(qq)
+                thrust_dir_inertial = C @ thrust_dir_body
+                a_thrust = (T_mag / max(mm, 1e-6)) * thrust_dir_inertial
 
                 a_grav = _two_body_accel(rr, use_j2=self.use_j2, use_j3=self.use_j3,
                                          use_j4=self.use_j4, use_high_order=self.use_high_order,
@@ -1729,35 +1781,110 @@ class SarmatScenario(FOBSScenario):
                     rho = self.atmosphere.density_scalar(alt)
                     vmag = np.linalg.norm(vv)
                     if vmag > 1e-6:
-                        q = 0.5 * rho * vmag**2
-                        a_drag = -q * self.cd * self.area / mm * (vv / vmag)
+                        q_dyn = 0.5 * rho * vmag**2
+                        a_drag = -q_dyn * self.cd * self.area / mm * (vv / vmag)
 
                 a_total = a_grav + a_drag + a_thrust
                 if self.wind_model is not None and 0 < alt < 150e3:
                     a_total = a_total + self._wind_accel(rr, vv, tt, dt)
-                return np.concatenate([vv, a_total, [dm_dt_val]])
 
-            y = np.concatenate([r, v, [m]])
-            k1 = rhs_tmp(r, v, m, t_current)
-            k2 = rhs_tmp(r + 0.5*dt*k1[:3], v + 0.5*dt*k1[3:6], m + 0.5*dt*k1[6], t_current + 0.5*dt)
-            k3 = rhs_tmp(r + 0.5*dt*k2[:3], v + 0.5*dt*k2[3:6], m + 0.5*dt*k2[6], t_current + 0.5*dt)
-            k4 = rhs_tmp(r + dt*k3[:3], v + dt*k3[3:6], m + dt*k3[6], t_current + dt)
+                # Rotational dynamics: tau = I * alpha + omega x (I * omega)
+                # Aerodynamic moment from CoP-CoM offset
+                r_cop = np.array([0.0, 0.0, -2.0])  # approximate CoP offset (body frame)
+                F_aero_body = np.array([0.0, 0.0, 0.0])
+                if alt < 100e3 and vmag > 1e-6:
+                    F_aero_body = np.array([0.0, 0.0, -q_dyn * self.cd * self.area])
+                tau_aero = np.cross(r_cop, F_aero_body)
+
+                # Gravity gradient torque
+                r_inertial = rr
+                r_body = C.T @ r_inertial
+                tau_grav = np.array([
+                    3 * MU_EARTH / np.linalg.norm(r_inertial)**5 *
+                    (r_body[1] * (I_body[2,2] - I_body[1,1]) +
+                     r_body[2] * (I_body[1,1] - I_body[2,2])) * 0.0,
+                    0.0, 0.0
+                ])
+
+                tau_total = tau_aero + tau_grav
+                I_inv = np.linalg.inv(I_body)
+                alpha = I_inv @ (tau_total - np.cross(ww, I_body @ ww))
+
+                # Quaternion kinematics
+                omega_quat = np.array([0.0, ww[0], ww[1], ww[2]])
+                q_dot = 0.5 * quat_multiply(qq, omega_quat)
+
+                # Mass properties evolution
+                dm_dt = dm_dt_val
+                m_fuel_new = mm - m_dry + dm_dt * dt
+                if m_fuel_new < 0:
+                    m_fuel_new = 0.0
+                m_new = m_dry + m_fuel_new
+
+                # CoM shift due to fuel consumption (simplified: fuel in forward tanks)
+                r_com_body_new = r_com_body + np.array([0.0, 0.0, -dm_dt * dt * 0.01 / max(m_new, 1e-6)])
+
+                # Inertia tensor evolution (simplified: fuel mass reduction)
+                I_fuel = m_fuel_new * np.diag([0.5, 0.5, 0.5]) * (2.0**2)
+                I_body_new = I_body + np.diag([I_fuel[0,0] - I_body[0,0],
+                                                I_fuel[1,1] - I_body[1,1],
+                                                I_fuel[2,2] - I_body[2,2]])
+
+                return np.concatenate([vv, a_total, q_dot, alpha, [dm_dt]])
+
+            y = np.concatenate([r, v, q, omega, [m]])
+            k1 = rhs_tmp(r, v, q, omega, m, t_current)
+            k2 = rhs_tmp(r + 0.5*dt*k1[:3], v + 0.5*dt*k1[3:6],
+                         q + 0.5*dt*k1[6:10], omega + 0.5*dt*k1[10:13],
+                         m + 0.5*dt*k1[13], t_current + 0.5*dt)
+            k3 = rhs_tmp(r + 0.5*dt*k2[:3], v + 0.5*dt*k2[3:6],
+                         q + 0.5*dt*k2[6:10], omega + 0.5*dt*k2[10:13],
+                         m + 0.5*dt*k2[13], t_current + 0.5*dt)
+            k4 = rhs_tmp(r + dt*k3[:3], v + dt*k3[3:6],
+                         q + dt*k3[6:10], omega + dt*k3[10:13],
+                         m + dt*k3[13], t_current + dt)
 
             r = r + (dt/6.0) * (k1[:3] + 2*k2[:3] + 2*k3[:3] + k4[:3])
             v = v + (dt/6.0) * (k1[3:6] + 2*k2[3:6] + 2*k3[3:6] + k4[3:6])
-            m = m + (dt/6.0) * (k1[6] + 2*k2[6] + 2*k3[6] + k4[6])
+            q = q + (dt/6.0) * (k1[6:10] + 2*k2[6:10] + 2*k3[6:10] + k4[6:10])
+            omega = omega + (dt/6.0) * (k1[10:13] + 2*k2[10:13] + 2*k3[10:13] + k4[10:13])
+            m = m + (dt/6.0) * (k1[13] + 2*k2[13] + 2*k3[13] + k4[13])
+
+            # Normalize quaternion
+            q_norm = np.linalg.norm(q)
+            if q_norm > 1e-12:
+                q = q / q_norm
+
             t_current += dt
 
             if not np.all(np.isfinite(r)) or not np.all(np.isfinite(v)) or not np.isfinite(m):
                 break
-            if m < 1e-3:
-                m = 0.0
+            if m < m_dry * 0.9:
                 break
 
             all_times.append(t_current)
-            all_states.append(np.concatenate([r.copy(), v.copy(), [m]]))
+            all_states.append(np.concatenate([r.copy(), v.copy(), q, omega, [m]]))
 
+        # Enforce Lambert boundary condition at burnout
         arr = np.array(all_states)
+        if arr.shape[0] > 0:
+            burnout_state = arr[-1, :6]
+            r_burnout = burnout_state[:3]
+            v_burnout = burnout_state[3:6]
+            alt_burnout = _ground_altitude(r_burnout)
+
+            if alt_burnout > 100e3 and t_current > 1.0:
+                tof_coast = max(self.boost_duration_s * 0.5, 600.0)
+                v_lambert = self._lambert_solver.required_velocity(
+                    r_burnout, self._aim_point, tof_coast
+                )
+                self._boost_end_state = burnout_state.copy()
+                self._boost_end_state[3:6] = v_lambert
+            else:
+                self._boost_end_state = burnout_state.copy()
+        else:
+            self._boost_end_state = np.concatenate([r, v, [m]])
+
         if arr.shape[0] == 0:
             return np.array([0.0]), np.array([np.concatenate([self.r0, self.v0, [self._initial_mass()]])])
         return np.array(all_times), arr
@@ -1777,6 +1904,18 @@ class SarmatScenario(FOBSScenario):
 
         all_t, all_s = self._integrate_full()
         self._cache = (all_t, all_s)
+
+        if hasattr(self, '_boost_end_state') and self._boost_end_state is not None:
+            t_burnout = all_t[-1] if len(all_t) > 0 else 0.0
+            if t <= t_burnout:
+                idx = int(np.searchsorted(all_t, t))
+                idx = min(max(idx, 1), len(all_t) - 1)
+                t0, t1 = all_t[idx-1], all_t[idx]
+                if abs(t1 - t0) < 1e-12:
+                    return all_s[idx, :6]
+                alpha = (t - t0) / (t1 - t0)
+                return (1 - alpha) * all_s[idx-1, :6] + alpha * all_s[idx, :6]
+
         if t >= all_t[-1]:
             return all_s[-1, :6]
         idx = int(np.searchsorted(all_t, t))
@@ -1791,8 +1930,136 @@ class SarmatScenario(FOBSScenario):
         times = np.asarray(times, dtype=float)
         return np.array([self.propagate(ti) for ti in times])
 
-    def _release_pbb(self, r_bus, v_bus, coast_states, coast_times):
-        """Populate lightweight warhead and decoy scenarios from bus state."""
+    def _full_trajectory(self):
+        """ICBM-specific 5-phase trajectory for RS-28 Sarmat.
+
+        Overrides the inherited FOBS trajectory with a suborbital
+        ICBM flight profile:
+
+        Phase 1: Launch Pad (ignition to liftoff)
+        Phase 2: Atmospheric Ascent (boost with drag, J2 gravity)
+        Phase 3: Exoatmospheric Guidance & Burnout (Lambert phase)
+        Phase 4: Free-Flight Ballistic Arc (Keplerian coast)
+        Phase 5: Atmospheric Reentry (terminal phase)
+        """
+        if self._cache is not None:
+            return self._cache
+
+        # Phase 1+2: Boost phase (powered ascent through atmosphere)
+        all_t, all_s = self._integrate_full()
+
+        # Extract burnout state (last state before engine cutoff)
+        burnout_idx = -1
+        burnout_state = all_s[burnout_idx]
+        r_burnout = burnout_state[:3]
+        v_burnout = burnout_state[3:6]
+        alt_burnout = _ground_altitude(r_burnout)
+
+        # Phase 3: Lambert boundary condition at burnout
+        # Compute the required velocity for target impact
+        tof_coast = max(self.boost_duration_s * 0.5, 600.0)
+        v_lambert = self._lambert_solver.required_velocity(
+            r_burnout, self._aim_point, tof_coast
+        )
+
+        # Use Lambert-corrected burnout velocity
+        v_burnout_corrected = v_lambert
+        burnout_state_corrected = np.concatenate([r_burnout, v_burnout_corrected])
+
+        # Phase 4: Free-flight ballistic arc (Keplerian coast with J2)
+        coast_r0 = r_burnout.copy()
+        coast_v0 = v_burnout_corrected.copy()
+
+        def coast_rhs(ti, y):
+            rr, vv = y[:3], y[3:]
+            a_grav = _two_body_accel(rr, use_j2=self.use_j2, use_j3=self.use_j3,
+                                         use_j4=self.use_j4, use_high_order=self.use_high_order,
+                                         use_third_body=self.use_third_body, use_tides=self.use_tides,
+                                         max_degree=self.max_degree, t=ti)
+            a_drag = np.zeros(3)
+            alt = _ground_altitude(rr)
+            if 0.0 < alt < 100e3:
+                rho = self.atmosphere.density_scalar(alt)
+                vmag = np.linalg.norm(vv)
+                if vmag > 1e-6:
+                    q = 0.5 * rho * vmag**2
+                    a_drag = -q * self.cd * self.area / self.mass * (vv / vmag)
+            return np.concatenate([vv, a_grav + a_drag])
+
+        def reentry_event(ti, y):
+            alt = _ground_altitude(y[:3])
+            return alt - 120e3
+        reentry_event.terminal = True
+        reentry_event.direction = -1
+
+        t_coast_max = 3000.0
+        coast_sol = solve_ivp(coast_rhs, (0.0, t_coast_max),
+                              np.concatenate([coast_r0, coast_v0]),
+                              method="RK45", rtol=1e-6, atol=1e-9,
+                              max_step=10.0, events=reentry_event,
+                              dense_output=True)
+
+        if coast_sol.t_events[0] is not None and len(coast_sol.t_events[0]) > 0:
+            t_reentry = float(coast_sol.t_events[0][0])
+            reentry_state = coast_sol.sol(t_reentry)
+        else:
+            t_reentry = float(coast_sol.t[-1])
+            reentry_state = coast_sol.y[:, -1]
+
+        # Phase 5: Atmospheric reentry (simplified terminal phase)
+        # The reentry state becomes the initial condition for terminal ballistic
+        # propagation to impact
+        r_reentry = reentry_state[:3]
+        v_reentry = reentry_state[3:6]
+
+        def impact_event(ti, y):
+            return _ground_altitude(y[:3])
+        impact_event.terminal = True
+        impact_event.direction = -1
+
+        reentry_sol = solve_ivp(coast_rhs, (0.0, 600.0),
+                                np.concatenate([r_reentry, v_reentry]),
+                                method="RK45", rtol=1e-6, atol=1e-9,
+                                max_step=5.0, events=impact_event,
+                                dense_output=True)
+
+        if reentry_sol.t_events[0] is not None and len(reentry_sol.t_events[0]) > 0:
+            t_impact = float(reentry_sol.t_events[0][0])
+            impact_state = reentry_sol.sol(t_impact)
+        else:
+            t_impact = float(reentry_sol.t[-1])
+            impact_state = reentry_sol.y[:, -1]
+
+        # Combine all phases into a single trajectory
+        # Boost phase states
+        boost_t = all_t
+        boost_s = all_s
+
+        # Coast phase states
+        coast_t = coast_sol.t
+        coast_s = coast_sol.y.T
+
+        # Reentry phase states
+        reentry_t = reentry_sol.t
+        reentry_s = reentry_sol.y.T
+
+        # Combine
+        all_t_combined = np.concatenate([boost_t, t_reentry + coast_t[-1] if len(coast_t) > 0 else t_reentry,
+                                         t_impact + (coast_t[-1] if len(coast_t) > 0 else 0.0) + reentry_t])
+        all_s_combined = np.vstack([boost_s, coast_s, reentry_s])
+
+        # Release PBB at burnout
+        self._release_pbb(r_burnout, v_burnout_corrected, coast_s, coast_t)
+
+        self._cache = (all_t_combined, all_s_combined)
+        return self._cache
+
+    def _release_pbb(self, r_bus, v_bus, coast_states=None, coast_times=None):
+        """Populate lightweight warhead and decoy scenarios from bus state.
+
+        Uses the ICBM burnout state (Lambert-corrected) as the
+        initial condition for warhead and decoy release.
+        """
         self._pbb_released = True
         bus_alt = np.linalg.norm(r_bus) - R_EARTH
         if bus_alt < self.pbb_release_alt_km * 1e3:

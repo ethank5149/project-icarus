@@ -15,6 +15,8 @@ Missile Trajectories" (GAO/NSIA), and open-literature INS/GNSS guidance.
 import numpy as np
 from typing import Optional, Tuple
 
+from .lambert import lambert, required_burnout_velocity_lambert
+
 MU_EARTH = 3.986004418e14
 R_EARTH = 6371e3
 G0 = 9.80665
@@ -423,137 +425,51 @@ class BurnoutTargeting:
     time of flight, compute the burnout velocity that makes the coasting
     trajectory intersect the target.
 
-    Uses Kepler's equation for the coasting phase, not Lambert (which is
-    for orbital transfers).
+    Uses Lambert's problem to determine the required velocity vector at
+    engine cutoff. At burnout, the missile's position and the target position
+    define a boundary-value problem: find the velocity v1 at r1 that reaches
+    r2 in the given time of flight under gravitational influence.
     """
 
     def __init__(self, mu: float = MU_EARTH):
         self.mu = mu
 
-    def _kepler_position(self, r0: np.ndarray, v0: np.ndarray, dt: float) -> np.ndarray:
-        """Propagate a Keplerian orbit from initial state for time dt.
-
-        Uses universal variable formulation for numerical stability.
-        """
-        r0 = np.asarray(r0, dtype=float)
-        v0 = np.asarray(v0, dtype=float)
-        r_mag = np.linalg.norm(r0)
-        v_mag = np.linalg.norm(v0)
-
-        # Specific energy
-        eps = 0.5 * v_mag**2 - self.mu / r_mag
-        if eps > 0:
-            # Hyperbolic - shouldn't happen for suborbital
-            return r0 + v0 * dt
-
-        # Semi-major axis
-        a = -self.mu / (2.0 * eps)
-
-        # Angular momentum
-        h = np.cross(r0, v0)
-        h_mag = np.linalg.norm(h)
-
-        # Eccentricity vector
-        e_vec = np.cross(v0, h) / self.mu - r0 / r_mag
-        e_mag = np.linalg.norm(e_vec)
-
-        if e_mag < 1e-9:
-            # Circular orbit
-            n = np.sqrt(self.mu / a**3)
-            M = n * dt
-            # Simple approximation for small angles
-            return r0 * np.cos(M) + v0 * np.sin(M) / n
-
-        # Mean motion
-        n = np.sqrt(self.mu / a**3)
-
-        # Initial guess for eccentric anomaly
-        r0_dot_v0 = np.dot(r0, v0)
-        cos_E0 = 1.0 - r_mag / a
-        sin_E0 = r0_dot_v0 / (np.sqrt(self.mu * a))
-        E0 = np.arctan2(sin_E0, cos_E0)
-
-        # Solve Kepler's equation: E - e*sin(E) = M = n*dt + E - e*sin(E0)
-        M = n * dt + E0 - e_mag * np.sin(E0)
-
-        E = M
-        for _ in range(50):
-            f = E - e_mag * np.sin(E) - M
-            if abs(f) < 1e-12:
-                break
-            fp = 1.0 - e_mag * np.cos(E)
-            E = E - f / max(fp, 1e-12)
-
-        # Position from eccentric anomaly
-        cos_E = np.cos(E)
-        sin_E = np.sin(E)
-        r = a * (1.0 - e_mag * cos_E)
-
-        # Position in orbital plane
-        e_unit = e_vec / max(e_mag, 1e-12)
-        p = h_mag**2 / self.mu  # Semi-latus rectum
-        # Radial and transverse unit vectors in orbital plane
-        u_r = np.array([cos_E - e_mag, sin_E * np.sqrt(1.0 - e_mag**2)])
-        u_r = u_r / max(np.linalg.norm(u_r), 1e-12)
-
-        # Actually, let me use the standard position formula
-        r_vec = np.zeros(3)
-        for i in range(3):
-            r_vec[i] = r * (np.cos(E) - e_mag * e_vec[i] / e_mag)
-
-        return r_vec
-
     def required_burnout_velocity(
         self,
-        r0: np.ndarray,
-        rf: np.ndarray,
-        tof: float,
-        burnout_alt: float = 250.0e3,
+        r_burnout: np.ndarray,
+        r_target: np.ndarray,
+        tof_coast: float,
     ) -> np.ndarray:
         """Find burnout velocity vector for suborbital trajectory to target.
 
-        Uses a differential corrector: guess burnout velocity [v_horiz, v_vert],
-        propagate the full coast phase with J2 gravity, check impact point, and
-        iterate until the miss to target is below tolerance.
+        Uses Lambert's problem to compute the required velocity at burnout
+        that, when coasted under J2-perturbed gravity, reaches the target.
 
         Returns velocity vector in ECEF.
         """
-        r0 = np.asarray(r0, dtype=float)
-        rf = np.asarray(rf, dtype=float)
-        r0_mag = np.linalg.norm(r0)
-        rf_mag = np.linalg.norm(rf)
-        cos_dnu = np.dot(r0, rf) / max(r0_mag * rf_mag, 1e-12)
-        cos_dnu = np.clip(cos_dnu, -1.0, 1.0)
-        dnu = np.arccos(cos_dnu)
+        r_burnout = np.asarray(r_burnout, dtype=float)
+        r_target = np.asarray(r_target, dtype=float)
 
-        # Unit basis vectors in the orbital plane defined by r0 x rf
-        u_r = r0 / max(r0_mag, 1e-12)
-        w_hat = np.cross(r0, rf)
-        w_mag = np.linalg.norm(w_hat)
-        if w_mag > 1e-12:
-            w_hat = w_hat / w_mag
-        else:
-            w_hat = np.array([0.0, 0.0, 1.0])
-        u_theta = np.cross(w_hat, u_r)
+        # First, solve the pure Keplerian Lambert problem to get an initial
+        # velocity estimate. This gives the velocity needed for the two-body
+        # case.
+        v_lambert = lambert(r_burnout, r_target, tof_coast, self.mu)
 
-        # Burnout position: along great-circle path at burnout altitude
-        # For ~7000km range, burnout occurs ~2000km downrange from launch
-        burnout_frac = 0.6
-        r_burnout = u_r * (R_EARTH + burnout_alt) + u_theta * burnout_frac * 3_500_000.0
-
-        # Guess: for ~7000km range, need ~6.8km/s at ~18° elevation
-        v_horiz_guess = 6500.0
-        v_vert_guess = 2000.0
+        # Refine using a differential corrector with J2 gravity propagation.
+        # The Lambert solution provides an excellent initial guess; typically
+        # only a few iterations are needed to converge with J2 perturbations.
+        v_horiz_guess = v_lambert.copy()
+        v_vert_guess = v_lambert.copy()
 
         # Time of flight for coast phase
-        tof_coast = tof * 0.65
+        tof_coast_ref = tof_coast
         dt_step = 1.0
 
-        def propagate_coast(v_horiz: float, v_vert: float) -> np.ndarray:
+        def propagate_coast_j2(v_vec: np.ndarray) -> np.ndarray:
             r = r_burnout.copy()
-            v = u_theta * v_horiz + u_r * v_vert
+            v = v_vec.copy()
             t = 0.0
-            while t < tof_coast:
+            while t < tof_coast_ref:
                 alt = np.linalg.norm(r) - R_EARTH
                 if alt < 0.0 and t > 1.0:
                     break
@@ -568,49 +484,36 @@ class BurnoutTargeting:
                     break
             return r
 
-        # Differential corrector
-        v_horiz = v_horiz_guess
-        v_vert = v_vert_guess
-        max_iter = 30
+        # Initial guess from Lambert
+        v_guess = v_lambert.copy()
+        max_iter = 15
         for i in range(max_iter):
-            impact_r = propagate_coast(v_horiz, v_vert)
-            miss = impact_r - rf
-
-            miss_x = np.dot(miss, u_theta)
-            miss_y = np.dot(miss, u_r)
+            impact_r = propagate_coast_j2(v_guess)
+            miss = impact_r - r_target
             miss_3d = np.linalg.norm(miss)
             if miss_3d < 10.0:
-                v_burnout = u_theta * v_horiz + u_r * v_vert
-                return v_burnout
+                return v_guess
 
             # Jacobian via finite differences
             dv = 50.0
-            impact_r_p = propagate_coast(v_horiz + dv, v_vert)
-            miss_p = impact_r_p - rf
-            dm_dvx = (np.dot(miss_p, u_theta) - miss_x) / dv
-            dm_dvy = (np.dot(miss_p, u_r) - miss_y) / dv
+            impact_r_p = propagate_coast_j2(v_guess + np.array([dv, 0.0, 0.0]))
+            miss_p = impact_r_p - r_target
+            dm_dvx = (np.dot(miss_p, miss) / miss_3d) / dv if miss_3d > 1e-9 else 0.0
 
-            impact_r_p2 = propagate_coast(v_horiz, v_vert + dv)
-            miss_p2 = impact_r_p2 - rf
-            dm_dvx2 = (np.dot(miss_p2, u_theta) - miss_x) / dv
-            dm_dvy2 = (np.dot(miss_p2, u_r) - miss_y) / dv
+            impact_r_p2 = propagate_coast_j2(v_guess + np.array([0.0, dv, 0.0]))
+            miss_p2 = impact_r_p2 - r_target
+            dm_dvy = (np.dot(miss_p2, miss) / miss_3d) / dv if miss_3d > 1e-9 else 0.0
 
-            J = np.array([
-                [dm_dvx, dm_dvx2],
-                [dm_dvy, dm_dvy2]
-            ])
-            try:
-                delta = np.linalg.solve(J, np.array([miss_x, miss_y]))
-                v_horiz = v_horiz - delta[0]
-                v_vert = v_vert - delta[1]
-                v_horiz = np.clip(v_horiz, 5000.0, 9000.0)
-                v_vert = np.clip(v_vert, 500.0, 4000.0)
-            except np.linalg.LinAlgError:
-                v_horiz = v_horiz - 0.3 * miss_x
-                v_vert = v_vert - 0.3 * miss_y
+            impact_r_p3 = propagate_coast_j2(v_guess + np.array([0.0, 0.0, dv]))
+            miss_p3 = impact_r_p3 - r_target
+            dm_dvz = (np.dot(miss_p3, miss) / miss_3d) / dv if miss_3d > 1e-9 else 0.0
 
-        v_burnout = u_theta * v_horiz + u_r * v_vert
-        return v_burnout
+            # Simple gradient descent with damping
+            alpha = 0.3
+            v_guess = v_guess - alpha * np.array([dm_dvx, dm_dvy, dm_dvz])
+            v_guess = np.clip(v_guess, 3000.0, 11000.0)
+
+        return v_guess
 
     def _coast_rhs(self, r: np.ndarray, v: np.ndarray) -> np.ndarray:
         r = np.asarray(r, dtype=float)

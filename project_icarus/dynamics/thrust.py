@@ -275,7 +275,7 @@ def sarmat_stage_specs():
         StageSpec(thrust=lambda t: 1.2e6, burn_time=180.0,
                   wet_mass=48_000.0, dry_mass=3_600.0, Isp=325.0,
                   mass_flow=247.0),
-        StageSpec(thrust=lambda t: 1.0e6, burn_time=90.0,
+        StageSpec(thrust=lambda t: 2.5e5, burn_time=90.0,
                   wet_mass=10_100.0, dry_mass=2_160.0, Isp=330.0,
                   mass_flow=77.2),
     ]
