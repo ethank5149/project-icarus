@@ -38,6 +38,13 @@ _WGS84_E2 = (_WGS84_A**2 - _WGS84_B**2) / _WGS84_A**2
 
 # reference/locations.yml stores site altitudes in FEET; geodetic_to_ecef wants m.
 _FT_TO_M = 0.3048
+_OMEGA_EARTH = 7.292115e-5  # rad/s
+
+
+def _earth_rotation_velocity(r_ecef: np.ndarray) -> np.ndarray:
+    """Compute Earth rotation velocity ω × r at the given ECEF position."""
+    omega = np.array([0.0, 0.0, _OMEGA_EARTH])
+    return np.cross(omega, r_ecef)
 
 
 def geodetic_to_ecef(lat_deg: float, lon_deg: float, alt_m: float = 0.0) -> np.ndarray:
@@ -230,7 +237,7 @@ def solve_icbm_trajectory(r0, r_target, launch_az_deg, launch_el_deg, tof_max=30
     
     def make_v0(el_deg):
         el = np.radians(el_deg)
-        return (np.cos(el) * hoz_dir + np.sin(el) * up) * v_mag_fixed
+        return (np.cos(el) * hoz_dir + np.sin(el) * up) * v_mag_fixed + _earth_rotation_velocity(r0) + _earth_rotation_velocity(r0)
     
     def objective(el_deg):
         v0 = make_v0(float(el_deg[0]))
@@ -321,7 +328,7 @@ def launch_to_target_velocity(
         el = np.radians(launch_el_deg)
         g = 9.81
         v_est = np.sqrt(range_km * 1000.0 * g / np.sin(2.0 * el))
-        v0 = v_dir * min(v_est, 12000.0)
+        v0 = v_dir * min(v_est, 12000.0) + _earth_rotation_velocity(r0)
         return v0, float(np.linalg.norm(v0))
 
 
@@ -479,7 +486,7 @@ def geodetic_launch_to_target(
             r_dir = r0 / np.linalg.norm(r0)
             v_dir = v_dir - np.dot(v_dir, r_dir) * r_dir
             v_dir = v_dir / np.linalg.norm(v_dir)
-            v0 = v_dir * v_mag
+            v0 = v_dir * v_mag + _earth_rotation_velocity(r0)
             speed = v_mag
         else:
             v0, speed = launch_to_target_velocity(
@@ -502,7 +509,7 @@ def geodetic_launch_to_target(
         horizontal = np.cos(az) * north + np.sin(az) * east
         if np.dot(v_dir, horizontal) < 0:
             v_dir = -v_dir
-        v0 = v_dir * v_mag
+        v0 = v_dir * v_mag + _earth_rotation_velocity(r0)
         target = FOBSScenario(
             r0=r0, v0=v0, apoapsis_km=apoapsis_km
         )
@@ -521,15 +528,16 @@ def geodetic_launch_to_target(
                 np.cos(np.radians(launch_lat)),
             ])
             v_dir = np.cos(np.radians(launch_el_deg)) * north + np.sin(np.radians(launch_el_deg)) * east
-            v0 = v_dir / np.linalg.norm(v_dir) * v_mag
+            v0 = v_dir / np.linalg.norm(v_dir) * v_mag + _earth_rotation_velocity(r0)
             speed = v_mag
         else:
-            v0, speed = launch_to_target_velocity(
+            v0, _ = launch_to_target_velocity(
                 launch_lat, launch_lon, launch_alt + glide_alt_km * 1000.0,
                 az, rng, launch_el_deg=kwargs.get("glide_el_deg", 1.0),
             )
             speed = speed_mach * 300.0
-            v0 = v0 / np.linalg.norm(v0) * speed
+            v_rot = _earth_rotation_velocity(r0)
+            v0 = (v0 - v_rot) / max(np.linalg.norm(v0 - v_rot), 1e-12) * speed + v_rot
         target = HGVScenario(
             r0=r0, v0=v0, max_alt_km=glide_alt_km,
             lateral_range_km=rng,
@@ -549,7 +557,7 @@ def geodetic_launch_to_target(
             r_dir = r0 / np.linalg.norm(r0)
             v_dir = v_dir - np.dot(v_dir, r_dir) * r_dir
             v_dir = v_dir / np.linalg.norm(v_dir)
-            v0 = v_dir * v_mag
+            v0 = v_dir * v_mag + _earth_rotation_velocity(r0)
             speed = v_mag
         else:
             v0, speed = launch_to_target_velocity(
@@ -576,7 +584,7 @@ def geodetic_launch_to_target(
             r_dir = r0 / np.linalg.norm(r0)
             v_dir = v_dir - np.dot(v_dir, r_dir) * r_dir
             v_dir = v_dir / np.linalg.norm(v_dir)
-            v0 = v_dir * v_mag
+            v0 = v_dir * v_mag + _earth_rotation_velocity(r0)
             speed = v_mag
         else:
             v0, speed = launch_to_target_velocity(
@@ -619,7 +627,7 @@ def geodetic_launch_to_target(
             r_dir = r0 / np.linalg.norm(r0)
             v_dir = v_dir - np.dot(v_dir, r_dir) * r_dir
             v_dir = v_dir / np.linalg.norm(v_dir)
-            v0 = v_dir * v_mag
+            v0 = v_dir * v_mag + _earth_rotation_velocity(r0)
             speed = v_mag
             target = SarmatScenario(
                 r0=r0, v0=v0,

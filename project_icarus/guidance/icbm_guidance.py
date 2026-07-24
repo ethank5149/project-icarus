@@ -449,23 +449,10 @@ class BurnoutTargeting:
         """
         r_burnout = np.asarray(r_burnout, dtype=float)
         r_target = np.asarray(r_target, dtype=float)
-
-        # First, solve the pure Keplerian Lambert problem to get an initial
-        # velocity estimate. This gives the velocity needed for the two-body
-        # case.
-        v_lambert = lambert(r_burnout, r_target, tof_coast, self.mu)
-
-        # Refine using a differential corrector with J2 gravity propagation.
-        # The Lambert solution provides an excellent initial guess; typically
-        # only a few iterations are needed to converge with J2 perturbations.
-        v_horiz_guess = v_lambert.copy()
-        v_vert_guess = v_lambert.copy()
-
-        # Time of flight for coast phase
         tof_coast_ref = tof_coast
         dt_step = 1.0
 
-        def propagate_coast_j2(v_vec: np.ndarray) -> np.ndarray:
+        def propagate_coast(v_vec):
             r = r_burnout.copy()
             v = v_vec.copy()
             t = 0.0
@@ -473,47 +460,26 @@ class BurnoutTargeting:
                 alt = np.linalg.norm(r) - R_EARTH
                 if alt < 0.0 and t > 1.0:
                     break
-                k1 = self._coast_rhs(r, v)
-                k2 = self._coast_rhs(r + 0.5 * dt_step * k1[:3], v + 0.5 * dt_step * k1[3:6])
-                k3 = self._coast_rhs(r + 0.5 * dt_step * k2[:3], v + 0.5 * dt_step * k2[3:6])
-                k4 = self._coast_rhs(r + dt_step * k3[:3], v + dt_step * k3[3:6])
-                r = r + (dt_step / 6.0) * (k1[:3] + 2.0 * k2[:3] + 2.0 * k3[:3] + k4[:3])
-                v = v + (dt_step / 6.0) * (k1[3:6] + 2.0 * k2[3:6] + 2.0 * k3[3:6] + k4[3:6])
+                a1 = _two_body_accel_j2(r)
+                k1r, k1v = v, a1
+                k2r = v + 0.5 * dt_step * k1v
+                k2v = _two_body_accel_j2(r + 0.5 * dt_step * k1r)
+                k3r = v + 0.5 * dt_step * k2v
+                k3v = _two_body_accel_j2(r + 0.5 * dt_step * k2r)
+                k4r = v + dt_step * k3v
+                k4v = _two_body_accel_j2(r + dt_step * k3r)
+                r = r + (dt_step / 6.0) * (k1r + 2.0 * k2r + 2.0 * k3r + k4r)
+                v = v + (dt_step / 6.0) * (k1v + 2.0 * k2v + 2.0 * k3v + k4v)
                 t += dt_step
                 if not np.all(np.isfinite(r)) or not np.all(np.isfinite(v)):
                     break
             return r
 
-        # Initial guess from Lambert
-        v_guess = v_lambert.copy()
-        max_iter = 15
-        for i in range(max_iter):
-            impact_r = propagate_coast_j2(v_guess)
-            miss = impact_r - r_target
-            miss_3d = np.linalg.norm(miss)
-            if miss_3d < 10.0:
-                return v_guess
-
-            # Jacobian via finite differences
-            dv = 50.0
-            impact_r_p = propagate_coast_j2(v_guess + np.array([dv, 0.0, 0.0]))
-            miss_p = impact_r_p - r_target
-            dm_dvx = (np.dot(miss_p, miss) / miss_3d) / dv if miss_3d > 1e-9 else 0.0
-
-            impact_r_p2 = propagate_coast_j2(v_guess + np.array([0.0, dv, 0.0]))
-            miss_p2 = impact_r_p2 - r_target
-            dm_dvy = (np.dot(miss_p2, miss) / miss_3d) / dv if miss_3d > 1e-9 else 0.0
-
-            impact_r_p3 = propagate_coast_j2(v_guess + np.array([0.0, 0.0, dv]))
-            miss_p3 = impact_r_p3 - r_target
-            dm_dvz = (np.dot(miss_p3, miss) / miss_3d) / dv if miss_3d > 1e-9 else 0.0
-
-            # Simple gradient descent with damping
-            alpha = 0.3
-            v_guess = v_guess - alpha * np.array([dm_dvx, dm_dvy, dm_dvz])
-            v_guess = np.clip(v_guess, 3000.0, 11000.0)
-
-        return v_guess
+        from .lambert import lambert_with_correction
+        return lambert_with_correction(
+            r_burnout, r_target, tof_coast, self.mu,
+            propagate_fn=propagate_coast,
+        )
 
     def _coast_rhs(self, r: np.ndarray, v: np.ndarray) -> np.ndarray:
         r = np.asarray(r, dtype=float)

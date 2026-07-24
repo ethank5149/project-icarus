@@ -4,95 +4,99 @@ Solves the boundary-value problem: given two position vectors r1, r2
 and the time of flight dt, find the velocity vector v1 at r1 that
 reaches r2 in time dt under gravitational influence.
 
-Uses Newton's method on the semi-major axis with Kepler's equation
-for the time-of-flight computation. This is the classical approach
-from astrodynamics and is robust for all ICBM suborbital trajectories.
+Uses the universal-variable (Stumpff-function) formulation with
+Newton-Raphson with bracketing fallback. Handles elliptic, parabolic,
+and hyperbolic transfers seamlessly.
 
-Reference: improved-mathematical-analysis.md Section 2 — Lambert's Problem
-applies at engine cutoff to determine the required velocity vector.
+Reference: improved-mathematical-analysis.md Section V (Universal Variables)
+and Section VI (Gooding initial-guess heuristics).
 """
 
 import numpy as np
-from scipy.optimize import brentq
 
 MU_EARTH = 3.986004418e14
 
 
-def _tof_elliptic(a, r1_mag, r2_mag, dnu, mu, short_way, dt):
-    """Compute time of flight for an elliptic transfer orbit.
+def _stumpff_c(z: float) -> float:
+    """Stumpff C(z) with series/closed-form fallback."""
+    if z > 1e-8:
+        return (1.0 - np.cos(np.sqrt(z))) / z
+    if z < -1e-8:
+        return (np.cosh(np.sqrt(-z)) - 1.0) / (-z)
+    return 0.5 - z / 24.0 + z**2 / 720.0
 
-    Uses Kepler's equation: TOF = sqrt(a^3/mu) * (M2 - M1)
-    where M = E - e*sin(E) is the mean anomaly.
-    """
-    if a <= 0:
+
+def _stumpff_s(z: float) -> float:
+    """Stumpff S(z) with series/closed-form fallback."""
+    if z > 1e-8:
+        s = np.sqrt(z)
+        return (s - np.sin(s)) / z**1.5
+    if z < -1e-8:
+        s = np.sqrt(-z)
+        return (np.sinh(s) - s) / (-z)**1.5
+    return 1.0 / 6.0 - z / 120.0 + z**2 / 5040.0
+
+
+def _y_of_z(z: float, r1: float, r2: float, A: float) -> float:
+    """Lambert y(z) = r1 + r2 + A*(z*S(z) - 1) / sqrt(C(z))."""
+    cz = _stumpff_c(z)
+    if abs(cz) < 1e-15:
+        return r1 + r2
+    return r1 + r2 + A * (z * _stumpff_s(z) - 1.0) / np.sqrt(cz)
+
+
+def _tof_residual(z: float, r1: float, r2: float, A: float,
+                   mu: float, dt: float, n_rev: int = 0) -> float:
+    """Universal-variable TOF residual: TOF_calc - dt. Returns inf for invalid z."""
+    cz = _stumpff_c(z)
+    if abs(cz) < 1e-15:
+        return 0.0
+    y = _y_of_z(z, r1, r2, A)
+    if y <= 1e-12:
         return np.inf
+    sz = _stumpff_s(z)
+    tof = (y / cz) ** 1.5 * sz + A * np.sqrt(y)
+    if n_rev > 0:
+        tof = tof + n_rev * np.pi * (y / cz) ** 1.5
+    return tof / np.sqrt(mu) - dt
 
-    sin_dnu = np.sin(dnu)
-    sin_dnu_sq = sin_dnu ** 2
 
-    # Eccentricity from the geometry of the transfer ellipse
-    A = (a - r2_mag) - (a - r1_mag) * np.cos(dnu)
-    B = (a - r1_mag)**2 * sin_dnu_sq
-    C = sin_dnu_sq
+def _gooding_initial_z(r1: float, r2: float, dnu: float, A: float,
+                        dt: float, mu: float) -> float:
+    """Gooding-inspired initial guess for universal variable z."""
+    c = np.sqrt(r1**2 + r2**2 - 2.0 * r1 * r2 * np.cos(dnu))
+    s = (r1 + r2 + c) / 2.0
+    q = np.sqrt(r1 * r2) / s * np.cos(dnu / 2.0)
+    T = np.sqrt(8.0 * mu / s**3) * dt
+    T0 = 2.0 / 3.0 * (1.0 - q**3)
 
-    denom_x = A**2 + B
-    if denom_x < 1e-15:
-        # Special case: r1 == r2 and transfer is along a circular orbit
-        if abs(r1_mag - r2_mag) < 1e-6 and abs(sin_dnu) < 1e-6:
-            return np.inf  # Degenerate
-        # Try a small perturbation
-        e = 0.0
+    if abs(T - T0) < 1e-12:
+        return 0.0
+
+    if T > T0:
+        dT = T - T0
+        x = -dT / (dT + T0 * (1.0 + (1.0 + q) / 2.0 * np.sqrt(dT / (dT + T0))))
     else:
-        x_sq = C / denom_x
-        if x_sq < 0 or x_sq > 1e10:
-            return np.inf
-        x = np.sqrt(x_sq)
-        e = 1.0 / (a * x) if x > 1e-15 else 0.0
+        dT = T0 - T
+        x = dT / (T0 * (1.0 + (1.0 - q) / 2.0 * dT / T0 * (1.0 + np.sqrt(dT / T0))))
 
-    if e >= 1.0 or e < 0:
-        return np.inf
-
-    # Eccentric anomalies
-    cos_E1 = np.clip((a - r1_mag) / (a * e), -1.0, 1.0) if e > 1e-15 else 1.0
-    cos_E2 = np.clip((a - r2_mag) / (a * e), -1.0, 1.0) if e > 1e-15 else 1.0
-
-    E1 = np.arccos(cos_E1)
-    E2 = np.arccos(cos_E2)
-
-    # Adjust for the correct direction of motion
-    if short_way:
-        if E2 < E1:
-            E2 = 2.0 * np.pi - E2
-    else:
-        if E2 > E1:
-            E2 = 2.0 * np.pi - E2
-
-    # Mean motion
-    n = np.sqrt(mu / a**3)
-
-    # Mean anomalies
-    M1 = E1 - e * np.sin(E1)
-    M2 = E2 - e * np.sin(E2)
-
-    # Time of flight
-    tof = (M2 - M1) / n
-
-    return tof - dt
+    a_min = s / 2.0
+    z = (1.0 - x**2) / a_min if abs(a_min) > 1e-15 else 0.0
+    return z
 
 
 def lambert(r1: np.ndarray, r2: np.ndarray, dt: float, mu: float = MU_EARTH,
-            short_way: bool = True, num_iter: int = 50, tol: float = 1e-10) -> np.ndarray:
+            short_way: bool = True, num_iter: int = 50,
+            tol: float = 1e-10) -> np.ndarray:
     """Solve the Lambert problem for velocity at r1.
 
-    Uses Newton's method on the semi-major axis with Kepler's equation
-    for the time-of-flight computation.
+    Uses the universal-variable formulation with Newton-Raphson
+    and bracketing fallback for robustness.
 
     Parameters
     ----------
-    r1 : ndarray
-        Initial position vector (m).
-    r2 : ndarray
-        Final position vector (m).
+    r1, r2 : ndarray
+        Initial and final position vectors (m).
     dt : float
         Time of flight (s). Must be positive.
     mu : float
@@ -102,7 +106,7 @@ def lambert(r1: np.ndarray, r2: np.ndarray, dt: float, mu: float = MU_EARTH,
     num_iter : int
         Maximum number of Newton iterations.
     tol : float
-        Convergence tolerance.
+        Convergence tolerance on time residual (s).
 
     Returns
     -------
@@ -114,123 +118,94 @@ def lambert(r1: np.ndarray, r2: np.ndarray, dt: float, mu: float = MU_EARTH,
 
     r1_mag = np.linalg.norm(r1)
     r2_mag = np.linalg.norm(r2)
-
     if r1_mag < 1e-9 or r2_mag < 1e-9:
         raise ValueError("Position vectors must have non-zero magnitude.")
-
     if dt <= 0:
         raise ValueError("Time of flight must be positive.")
 
-    # Transfer angle
     cos_dnu = np.dot(r1, r2) / (r1_mag * r2_mag)
     cos_dnu = np.clip(cos_dnu, -1.0, 1.0)
     dnu = np.arccos(cos_dnu)
     if not short_way:
         dnu = 2.0 * np.pi - dnu
 
-    sin_dnu = np.sin(dnu)
-    if abs(sin_dnu) < 1e-15:
+    if abs(np.sin(dnu)) < 1e-15:
         raise ValueError("Position vectors are collinear; Lambert problem is degenerate.")
 
-    sin_half_dnu = np.sin(dnu / 2.0)
-    cos_half_dnu = np.cos(dnu / 2.0)
+    A = np.sqrt(r1_mag * r2_mag * (1.0 + np.cos(dnu)))
+    if not short_way:
+        A = -A
 
-    # Semi-major axis estimate (initial guess)
-    a_est = (r1_mag + r2_mag + 2.0 * np.sqrt(r1_mag * r2_mag) * cos_half_dnu) / (4.0 * sin_half_dnu**2)
+    # Bracket the valid z range
+    c = np.sqrt(r1_mag**2 + r2_mag**2 - 2.0 * r1_mag * r2_mag * np.cos(dnu))
+    s = (r1_mag + r2_mag + c) / 2.0
+    a_min = s / 2.0
+    z_lo = 1e-12
+    z_hi = max(100.0, 1.0 / a_min * 100.0) if a_min > 1e-15 else 100.0
 
-    # For suborbital ICBM trajectories, a_est is typically large and positive
+    res_lo = _tof_residual(z_lo, r1_mag, r2_mag, A, mu, dt, 0)
+    res_hi = _tof_residual(z_hi, r1_mag, r2_mag, A, mu, dt, 0)
 
-    def tof_residual(a):
-        """Compute TOF residual for a given semi-major axis."""
-        return _tof_elliptic(a, r1_mag, r2_mag, dnu, mu, short_way, dt)
+    if not np.isfinite(res_lo) or not np.isfinite(res_hi) or res_lo * res_hi > 0:
+        if res_lo > 0:
+            z_lo = z_lo * 0.1
+            res_lo = _tof_residual(z_lo, r1_mag, r2_mag, A, mu, dt, 0)
+        if res_hi < 0:
+            z_hi = z_hi * 10.0
+            res_hi = _tof_residual(z_hi, r1_mag, r2_mag, A, mu, dt, 0)
 
-    # Find the semi-major axis using Brent's method
-    a_min = max(r1_mag, r2_mag) * 1.001
-    a_max = a_est * 100.0
+    z = _gooding_initial_z(r1_mag, r2_mag, dnu, A, dt, mu)
+    z = np.clip(z, z_lo * 0.5, z_hi * 2.0)
+    sqrt_mu = np.sqrt(mu)
 
-    # Check if a_est is already a good solution
-    residual_at_est = tof_residual(a_est)
-    if abs(residual_at_est) < tol:
-        a_sol = a_est
-    else:
-        # Try to find a bracket
-        try:
-            a_sol = brentq(tof_residual, a_min, a_max, xtol=tol, maxiter=num_iter)
-        except ValueError:
-            # If brentq fails, try expanding the bracket
-            a_max_expanded = a_max
-            for _ in range(10):
-                a_max_expanded *= 2.0
-                try:
-                    a_sol = brentq(tof_residual, a_min, a_max_expanded, xtol=tol, maxiter=num_iter)
-                    break
-                except ValueError:
-                    continue
+    # Newton-Raphson with bracketing fallback
+    converged = False
+    for _ in range(num_iter):
+        res = _tof_residual(z, r1_mag, r2_mag, A, mu, dt, 0)
+        if abs(res) < tol:
+            converged = True
+            break
+        if not np.isfinite(res):
+            break
+        dz = 1e-8 * max(1.0, abs(z))
+        res_p = _tof_residual(z + dz, r1_mag, r2_mag, A, mu, dt, 0)
+        res_m = _tof_residual(z - dz, r1_mag, r2_mag, A, mu, dt, 0)
+        if not np.isfinite(res_p) or not np.isfinite(res_m):
+            break
+        dT_dz = (res_p - res_m) / (2.0 * dz)
+        if abs(dT_dz) < 1e-15:
+            break
+        step = res / (dT_dz / sqrt_mu)
+        z_new = z - step
+        if z_new <= z_lo or z_new >= z_hi:
+            break
+        z = z_new
+
+    # Bisection fallback
+    if not converged:
+        for _ in range(num_iter):
+            z_mid = (z_lo + z_hi) / 2.0
+            res_mid = _tof_residual(z_mid, r1_mag, r2_mag, A, mu, dt, 0)
+            if abs(res_mid) < tol or (z_hi - z_lo) < 1e-15:
+                z = z_mid
+                converged = True
+                break
+            if res_lo * res_mid < 0:
+                z_hi = z_mid
+                res_hi = res_mid
             else:
-                a_sol = a_est
+                z_lo = z_mid
+                res_lo = res_mid
+            z = (z_lo + z_hi) / 2.0
 
-    # Compute eccentricity
-    A = (a_sol - r2_mag) - (a_sol - r1_mag) * np.cos(dnu)
-    B = (a_sol - r1_mag)**2 * sin_dnu**2
-    C = sin_dnu**2
-    denom_x = A**2 + B
-    if denom_x < 1e-15:
-        e = 0.0
-    else:
-        x_sq = C / denom_x
-        if x_sq < 0:
-            e = 0.0
-        else:
-            x = np.sqrt(x_sq)
-            e = 1.0 / (a_sol * x) if x > 1e-15 else 0.0
-
-    if e >= 1.0:
-        e = 0.999
-    if e < 0:
-        e = 0.0
-
-    # Eccentric anomalies
-    if e > 1e-15:
-        cos_E1 = np.clip((a_sol - r1_mag) / (a_sol * e), -1.0, 1.0)
-        E1 = np.arccos(cos_E1)
-    else:
-        E1 = 0.0
-
-    # True anomaly at r1
-    sin_E1 = np.sqrt(max(1.0 - cos_E1**2, 0.0)) if e > 1e-15 else 0.0
-    denom = 1.0 - e * cos_E1
-    if abs(denom) < 1e-15:
-        gamma = np.pi / 2.0
-    else:
-        cos_nu1 = (cos_E1 - e) / denom
-        sin_nu1 = np.sqrt(max(1.0 - e**2, 0.0)) * sin_E1 / denom
-        gamma = np.arctan2(e * sin_nu1, 1.0 + e * cos_nu1)
-
-    # Velocity magnitude from vis-viva equation
-    v_mag = np.sqrt(mu * (2.0 / r1_mag - 1.0 / a_sol))
-
-    # Radial and transverse unit vectors at r1
-    r_hat = r1 / r1_mag
-
-    # Orbital plane normal
-    h_hat = np.cross(r1, r2)
-    h_mag = np.linalg.norm(h_hat)
-    if h_mag > 1e-15:
-        h_hat = h_hat / h_mag
-    else:
-        h_hat = np.array([0.0, 0.0, 1.0])
-
-    # Transverse unit vector (perpendicular to r_hat in the orbital plane)
-    theta_hat = np.cross(h_hat, r_hat)
-    theta_hat_mag = np.linalg.norm(theta_hat)
-    if theta_hat_mag > 1e-15:
-        theta_hat = theta_hat / theta_hat_mag
-    else:
-        theta_hat = np.array([0.0, 0.0, 0.0])
-
-    # Velocity vector: v = v_mag * (cos(gamma) * r_hat + sin(gamma) * theta_hat)
-    v1 = v_mag * (np.cos(gamma) * r_hat + np.sin(gamma) * theta_hat)
-
+    y = _y_of_z(z, r1_mag, r2_mag, A)
+    if y <= 0.0:
+        y = 1e-15
+    f = 1.0 - y / r1_mag
+    g = A * np.sqrt(y / mu) if abs(mu) > 1e-15 else 0.0
+    if abs(g) < 1e-15:
+        g = dt / (1.0 - f + 1e-15)
+    v1 = (r2 - f * r1) / g
     return v1
 
 
@@ -259,3 +234,79 @@ def required_burnout_velocity_lambert(
         Required velocity vector at burnout (m/s) in the same frame as r_burnout.
     """
     return lambert(r_burnout, r_target, tof_coast, mu)
+
+
+def lambert_with_correction(
+    r_burnout: np.ndarray,
+    r_target: np.ndarray,
+    tof_coast: float,
+    mu: float,
+    propagate_fn,
+    max_iter: int = 10,
+    tol_miss: float = 100.0,
+    tol_dv: float = 1.0,
+    dv_perturb: float = 50.0,
+) -> np.ndarray:
+    """Lambert solution refined by a differential corrector.
+
+    Uses Lambert's problem for an analytical initial guess, then iteratively
+    corrects the burnout velocity by propagating under the full perturbed
+    gravity model specified by ``propagate_fn``.
+
+    Parameters
+    ----------
+    r_burnout, r_target : ndarray
+        Burnout position and target position (m).
+    tof_coast : float
+        Coast time of flight (s).
+    mu : float
+        Gravitational parameter (m^3/s^2).
+    propagate_fn : callable
+        ``propagate_fn(r, v) -> r_impact``; integrates a coast trajectory
+        from ``(r, v)`` to impact and returns the final position.
+    max_iter : int
+        Maximum correction iterations.
+    tol_miss : float
+        Converge when miss distance (m) is below this threshold.
+    tol_dv : float
+        Converge when velocity correction magnitude (m/s) is below this threshold.
+    dv_perturb : float
+        Perturbation magnitude (m/s) for finite-difference Jacobian.
+
+    Returns
+    -------
+    v_corrected : ndarray
+        Corrected burnout velocity (m/s).
+    """
+    r_burnout = np.asarray(r_burnout, dtype=float)
+    r_target = np.asarray(r_target, dtype=float)
+
+    v_guess = lambert(r_burnout, r_target, tof_coast, mu)
+
+    for _ in range(max_iter):
+        impact_r = propagate_fn(r_burnout, v_guess)
+        miss = impact_r - r_target
+        miss_3d = float(np.linalg.norm(miss))
+        if miss_3d < tol_miss:
+            return v_guess
+
+        dv = dv_perturb
+        jac = np.zeros((3, 3))
+        for axis in range(3):
+            delta = np.zeros(3)
+            delta[axis] = dv
+            r_p = propagate_fn(r_burnout, v_guess + delta)
+            jac[:, axis] = (r_p - impact_r) / dv
+
+        try:
+            delta_v = np.linalg.solve(jac, -miss)
+        except np.linalg.LinAlgError:
+            delta_v = -miss / (miss_3d + 1e-12) * min(miss_3d, dv)
+
+        v_new = v_guess + delta_v
+        if float(np.linalg.norm(v_new - v_guess)) < tol_dv:
+            return v_new
+        v_guess = v_new
+
+    return v_guess
+

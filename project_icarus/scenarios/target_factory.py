@@ -13,7 +13,7 @@ from ..dynamics.gravity import gravity_inertial
 from ..dynamics.coordinate_systems import quat_to_dcm, quat_multiply
 from ..dynamics.thrust import StageSpec, MultiStageThrustModel, StageSeparation, sarmat_stage_dicts
 from ..guidance.icbm_guidance import ICBMGuidance
-from ..guidance.lambert import lambert, required_burnout_velocity_lambert
+from ..guidance.lambert import lambert, lambert_with_correction, required_burnout_velocity_lambert
 
 try:
     from ..dynamics.gravity import gravity_inertial_jit, GRAVITY_JIT_AVAILABLE
@@ -24,6 +24,13 @@ except Exception:
 MU_EARTH = 3.986004418e14
 R_EARTH = 6371e3
 J2_EARTH = 1.08263e-3
+_OMEGA_EARTH = 7.292115e-5  # rad/s
+
+
+def _earth_rotation_velocity(r_ecef: np.ndarray) -> np.ndarray:
+    """Compute Earth rotation velocity ω × r at the given ECEF position."""
+    omega = np.array([0.0, 0.0, _OMEGA_EARTH])
+    return np.cross(omega, np.asarray(r_ecef, dtype=float))
 
 _WGS84_A = 6378137.0
 _WGS84_F = 1.0 / 298.257223563
@@ -451,7 +458,18 @@ class BallisticScenario:
         if 0.0 < alt < 100e3 and vmag > 1e-6:
             rho = self.atmosphere.density_scalar(alt)
             q_dyn = 0.5 * rho * vmag**2
-            a_drag = -q_dyn * self.cd * self.area / self.mass * (v / vmag)
+            if getattr(self, 'geometry_key', None):
+                try:
+                    mach = vmag / max(self.atmosphere.speed_of_sound_scalar(alt), 1.0)
+                except Exception:
+                    mach = vmag / 340.0
+                cd, _, _, _, _ = blended_aero(
+                    mach=mach, alpha=0.0, beta=0.0,
+                    altitude=alt, boundary_alt=100e3, taper_width=5e3,
+                )
+            else:
+                cd = self.cd
+            a_drag = -q_dyn * cd * self.area / self.mass * (v / vmag)
         a = a_grav + a_drag
         if t is not None:
             a = a + self._wind_accel(r, v, t, dt)
@@ -548,12 +566,12 @@ def _kepler_propagate(r0, v0, t, mu):
         az = np.radians(launch_az_deg)
         el = np.radians(launch_el_deg)
         speed = np.sqrt(2 * MU_EARTH / (R_EARTH + 0.0))
+        r0 = np.array([R_EARTH, 0.0, 0.0])
         v0 = speed * np.array([
             np.cos(el) * np.sin(az),
             np.cos(el) * np.cos(az),
             np.sin(el),
-        ])
-        r0 = np.array([R_EARTH, 0.0, 0.0])
+        ]) + _earth_rotation_velocity(r0)
         return cls(r0=r0, v0=v0)
 
 
@@ -964,7 +982,7 @@ class HGVScenario:
     def from_params(cls, max_alt_km: float, lateral_range_km: float, speed_mach: float = 10.0):
         r0 = np.array([R_EARTH + max_alt_km * 1e3, 0.0, 0.0])
         v_mag = speed_mach * 300.0
-        v0 = np.array([0.0, v_mag, 0.0])
+        v0 = np.array([0.0, v_mag, 0.0]) + _earth_rotation_velocity(r0)
         return cls(r0=r0, v0=v0, max_alt_km=max_alt_km, lateral_range_km=lateral_range_km)
 
 
@@ -1200,7 +1218,7 @@ class SwarmScenario:
     def from_params(cls, n_payloads: int, spread_deg: float, range_km: float):
         r0 = np.array([R_EARTH, 0.0, 0.0])
         speed = np.sqrt(2 * MU_EARTH / (R_EARTH + 0.0))
-        v0 = np.array([0.0, speed, 0.0])
+        v0 = np.array([0.0, speed, 0.0]) + _earth_rotation_velocity(r0)
         return cls(bus_r0=r0, bus_v0=v0, n_payloads=n_payloads, spread_deg=spread_deg)
 
 
@@ -1497,7 +1515,7 @@ class CruiseMissileScenario:
     def from_params(cls, launch_alt_km: float = 0.0, range_km: float = 500.0,
                     speed_mach: float = 0.8):
         r0 = np.array([R_EARTH + launch_alt_km * 1e3, 0.0, 0.0])
-        v0 = np.array([0.0, speed_mach * 340.0, 0.0])
+        v0 = np.array([0.0, speed_mach * 340.0, 0.0]) + _earth_rotation_velocity(r0)
         return cls(r0=r0, v0=v0, cruise_speed_mach=speed_mach)
 
 
@@ -1512,12 +1530,54 @@ class _LambertBurnoutSolver:
     """
 
     mu: float = MU_EARTH
+    use_j2: bool = True
+    use_j3: bool = False
+    use_j4: bool = False
+    use_high_order: bool = False
+    use_third_body: bool = False
+    use_tides: bool = False
+    max_degree: int = 10
+
+    def _propagate_coast(self, r_burnout: np.ndarray, v_burnout: np.ndarray) -> np.ndarray:
+        """Propagate from burnout to ground impact under full gravity."""
+        r = np.asarray(r_burnout, dtype=float).copy()
+        v = np.asarray(v_burnout, dtype=float).copy()
+        t = 0.0
+        dt = 1.0
+        while t < 3000.0:
+            alt = _ground_altitude(r)
+            if alt <= 0.0 and t > 1.0:
+                break
+            a1 = _two_body_accel(r, use_j2=self.use_j2, use_j3=self.use_j3, use_j4=self.use_j4,
+                                 use_high_order=self.use_high_order, use_third_body=self.use_third_body,
+                                 use_tides=self.use_tides, max_degree=self.max_degree, t=t)
+            k1r, k1v = v, a1
+            k2r = v + 0.5 * dt * k1v
+            k2v = _two_body_accel(r + 0.5 * dt * k1r, use_j2=self.use_j2, use_j3=self.use_j3, use_j4=self.use_j4,
+                                  use_high_order=self.use_high_order, use_third_body=self.use_third_body,
+                                  use_tides=self.use_tides, max_degree=self.max_degree, t=t + 0.5 * dt)
+            k3r = v + 0.5 * dt * k2v
+            k3v = _two_body_accel(r + 0.5 * dt * k2r, use_j2=self.use_j2, use_j3=self.use_j3, use_j4=self.use_j4,
+                                  use_high_order=self.use_high_order, use_third_body=self.use_third_body,
+                                  use_tides=self.use_tides, max_degree=self.max_degree, t=t + 0.5 * dt)
+            k4r = v + dt * k3v
+            k4v = _two_body_accel(r + dt * k3r, use_j2=self.use_j2, use_j3=self.use_j3, use_j4=self.use_j4,
+                                  use_high_order=self.use_high_order, use_third_body=self.use_third_body,
+                                  use_tides=self.use_tides, max_degree=self.max_degree, t=t + dt)
+            r = r + (dt / 6.0) * (k1r + 2.0 * k2r + 2.0 * k3r + k4r)
+            v = v + (dt / 6.0) * (k1v + 2.0 * k2v + 2.0 * k3v + k4v)
+            t += dt
+            if not np.all(np.isfinite(r)) or not np.all(np.isfinite(v)):
+                break
+        return r
 
     def required_velocity(self, r_burnout: np.ndarray, r_target: np.ndarray,
                           tof_coast: float) -> np.ndarray:
-        """Compute the required burnout velocity using Lambert's problem."""
-        return required_burnout_velocity_lambert(
-            r_burnout, r_target, tof_coast, self.mu
+        """Compute the required burnout velocity using Lambert's problem
+        with differential correction under full perturbed gravity."""
+        return lambert_with_correction(
+            r_burnout, r_target, tof_coast, self.mu,
+            propagate_fn=self._propagate_coast,
         )
 
     def burnout_error(self, r_burnout: np.ndarray, v_burnout: np.ndarray,
@@ -1781,8 +1841,19 @@ class SarmatScenario(FOBSScenario):
                     rho = self.atmosphere.density_scalar(alt)
                     vmag = np.linalg.norm(vv)
                     if vmag > 1e-6:
+                        if getattr(self, 'geometry_key', None):
+                            try:
+                                mach = vmag / max(self.atmosphere.speed_of_sound_scalar(alt), 1.0)
+                            except Exception:
+                                mach = vmag / 340.0
+                            cd, _, _, _, _ = blended_aero(
+                                mach=mach, alpha=0.0, beta=0.0,
+                                altitude=alt, boundary_alt=100e3, taper_width=5e3,
+                            )
+                        else:
+                            cd = self.cd
                         q_dyn = 0.5 * rho * vmag**2
-                        a_drag = -q_dyn * self.cd * self.area / mm * (vv / vmag)
+                        a_drag = -q_dyn * cd * self.area / mm * (vv / vmag)
 
                 a_total = a_grav + a_drag + a_thrust
                 if self.wind_model is not None and 0 < alt < 150e3:
@@ -1982,8 +2053,19 @@ class SarmatScenario(FOBSScenario):
                 rho = self.atmosphere.density_scalar(alt)
                 vmag = np.linalg.norm(vv)
                 if vmag > 1e-6:
-                    q = 0.5 * rho * vmag**2
-                    a_drag = -q * self.cd * self.area / self.mass * (vv / vmag)
+                    if getattr(self, 'geometry_key', None):
+                        try:
+                            mach = vmag / max(self.atmosphere.speed_of_sound_scalar(alt), 1.0)
+                        except Exception:
+                            mach = vmag / 340.0
+                        cd, _, _, _, _ = blended_aero(
+                            mach=mach, alpha=0.0, beta=0.0,
+                            altitude=alt, boundary_alt=100e3, taper_width=5e3,
+                        )
+                    else:
+                        cd = self.cd
+                    q_dyn = 0.5 * rho * vmag**2
+                    a_drag = -q_dyn * cd * self.area / self.mass * (vv / vmag)
             return np.concatenate([vv, a_grav + a_drag])
 
         def reentry_event(ti, y):
